@@ -63,6 +63,9 @@ pub enum StoreError {
 
 #[async_trait]
 pub trait TaskStore: Send + Sync {
+    /// Лёгкая проверка доступности хранилища (без данных).
+    async fn ping(&self) -> Result<(), StoreError>;
+
     async fn create_or_get_idempotent(&self, task: NewTask)
         -> Result<CreateTaskResult, StoreError>;
 

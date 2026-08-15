@@ -11,6 +11,8 @@ members = [
     "crates/memory-task-store",
     "crates/sqlite-task-store-adapter",
     "crates/postgres-task-store-adapter",
+    "crates/protocol-a2a-server",
+    "crates/protocol-acp-runtime",
     "crates/adapterd",
 ]
 
@@ -20,11 +22,30 @@ edition = "2021"
 license = "BSL-1.1"
 repository = "https://github.com/GG-QandV/agent-connector"
 
+# A2A SDK — pinned commit (см. docs/design/a2a-sdk-pinned-dependencies.toml).
+[workspace.dependencies.a2a]
+package = "a2a-lf"
+git = "https://github.com/a2aproject/a2a-rs.git"
+rev = "02ee56024a485a5f184cbc55d1706918ee1ff809"
+
+[workspace.dependencies.a2a-pb]
+package = "a2a-pb"
+git = "https://github.com/a2aproject/a2a-rs.git"
+rev = "02ee56024a485a5f184cbc55d1706918ee1ff809"
+
+[workspace.dependencies.a2a-server]
+package = "a2a-server-lf"
+git = "https://github.com/a2aproject/a2a-rs.git"
+rev = "02ee56024a485a5f184cbc55d1706918ee1ff809"
+default-features = false
+
 [workspace.dependencies]
 async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 futures-util = "0.3"
+http-body-util = "0.1"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,8 +53,11 @@ serde_yaml = "0.9"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "chrono", "uuid"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-stream = "0.1"
 tokio-util = "0.7"
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
@@ -42,6 +66,8 @@ adapter-store-contract = { path = "crates/adapter-store-contract" }
 adapter-core = { path = "crates/adapter-core" }
 protocol-a2a-mapper = { path = "crates/protocol-a2a-mapper" }
 protocol-acp-mapper = { path = "crates/protocol-acp-mapper" }
+protocol-a2a-server = { path = "crates/protocol-a2a-server" }
+protocol-acp-runtime = { path = "crates/protocol-acp-runtime" }
 driver-stdio = { path = "crates/driver-stdio" }
 driver-http-sse = { path = "crates/driver-http-sse" }
 memory-task-store = { path = "crates/memory-task-store" }

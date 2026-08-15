@@ -118,6 +118,9 @@ pub struct CoreEvent {
 
 #[derive(Clone, Debug)]
 pub struct InvokeRequest {
+    /// Явный task_id (для wire-слоёв A2A/ACP, где id генерирует клиент).
+    /// Если None — core генерирует новый UUID.
+    pub task_id: Option<TaskId>,
     pub agent_id: Option<AgentId>,
     pub skill_id: Option<String>,
     pub idempotency_key: String,

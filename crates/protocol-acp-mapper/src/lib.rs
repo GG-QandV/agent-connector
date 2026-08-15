@@ -177,6 +177,7 @@ impl<C: AcpCoreService> AcpMapper<C> {
             context["workspace"] = serde_json::Value::String(workspace);
         }
         let command = CoreCommand::Invoke(InvokeRequest {
+            task_id: None,
             agent_id: prompt.agent_id.map(adapter_core::AgentId),
             skill_id: prompt.skill_id,
             idempotency_key: format!("acp:{}", prompt.request_id),

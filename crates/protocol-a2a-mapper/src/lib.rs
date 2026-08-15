@@ -299,6 +299,11 @@ fn to_core_invoke(request: A2aTaskRequest) -> Result<InvokeRequest, A2aMapperErr
         .map(|value| parse_uuid(value, "context_id"))
         .transpose()?;
     Ok(InvokeRequest {
+        task_id: request
+            .task_id
+            .as_deref()
+            .map(parse_uuid_task)
+            .transpose()?,
         agent_id: request.target_agent_id.map(adapter_core::AgentId),
         skill_id: request.skill_id,
         idempotency_key: request.idempotency_key,
@@ -446,4 +451,8 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid, A2aMapperError> {
     value
         .parse()
         .map_err(|_| A2aMapperError::InvalidRequest(format!("{field} must be UUID")))
+}
+
+fn parse_uuid_task(value: &str) -> Result<adapter_core::TaskId, A2aMapperError> {
+    parse_uuid(value, "task_id")
 }

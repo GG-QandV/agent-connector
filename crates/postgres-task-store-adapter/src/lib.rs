@@ -66,6 +66,14 @@ impl PostgresTaskStore {
 
 #[async_trait]
 impl TaskStore for PostgresTaskStore {
+    async fn ping(&self) -> Result<(), StoreError> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map_err(db_error)?;
+        Ok(())
+    }
+
     async fn create_or_get_idempotent(
         &self,
         task: NewTask,

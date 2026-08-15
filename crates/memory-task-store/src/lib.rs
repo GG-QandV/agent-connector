@@ -41,6 +41,11 @@ impl MemoryTaskStore {
 
 #[async_trait]
 impl TaskStore for MemoryTaskStore {
+    async fn ping(&self) -> Result<(), StoreError> {
+        let _guard = self.state.lock().await;
+        Ok(())
+    }
+
     async fn create_or_get_idempotent(
         &self,
         task: NewTask,

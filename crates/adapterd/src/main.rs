@@ -1,13 +1,8 @@
-//! `adapterd` — composition root and daemon lifecycle.
+//! `adapterd` — composition root и daemon lifecycle.
 //!
-//! This binary owns config loading, storage/driver construction, background
-//! retention cleanup and graceful shutdown. It deliberately does not contain
-//! A2A/ACP wire server code: those protocol routers receive Arc<AdapterCore>.
-//!
-//! Expected workspace crates:
-//! adapter_core, adapter_model, adapter_store_contract, adapterd_config,
-//! memory_task_store, sqlite_task_store_adapter, postgres_task_store_adapter,
-//! driver_stdio, driver_http_sse.
+//! Владеет config, storage, drivers, background retention-cleanup и запускает
+//! A2A HTTP router (a2a-server) + health/readiness. ACP stdio runtime
+//! поднимается отдельным процессом/профилем.
 
 use std::{env, path::Path, sync::Arc, time::Duration};
 
@@ -39,6 +34,13 @@ enum StartupError {
 
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let config_path = env::args()
         .nth(1)
         .unwrap_or_else(|| "./adapter.yaml".into());
@@ -51,7 +53,10 @@ async fn main() -> Result<(), StartupError> {
 struct Daemon {
     config: Config,
     core: Arc<AdapterCore>,
+    store: Arc<dyn TaskStore>,
+    registry: Arc<AgentRegistry>,
     cleanup_task: JoinHandle<()>,
+    draining: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Daemon {
@@ -69,7 +74,7 @@ impl Daemon {
         }
         let core = Arc::new(AdapterCore::new(
             store.clone(),
-            registry,
+            registry.clone(),
             Arc::new(AllowAllPolicy), // replace with PolicyEngine in remote profile
             config.runtime.max_concurrent_tasks,
         ));
@@ -94,21 +99,59 @@ impl Daemon {
         Ok(Self {
             config,
             core,
+            store,
+            registry,
             cleanup_task,
+            draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
     async fn run(self) {
-        tracing::info!(mode=?self.config.mode, agents=self.config.agents.len(), "adapterd started");
-        // A2A HTTP router and/or ACP stdio loop are started here as independent
-        // tasks, each holding self.core.clone(). Their absence does not affect
-        // storage, driver lifecycle or cleanup.
+        let addr = env::var("ADAPTERD_LISTEN").unwrap_or_else(|_| "0.0.0.0:8348".into());
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                tracing::error!(error = %e, addr = %addr, "cannot bind http listener");
+                return;
+            }
+        };
+        tracing::info!(mode=?self.config.mode, agents=self.config.agents.len(), addr=%addr, "adapterd started");
+
+        let executor = Arc::new(protocol_a2a_server::AdapterAgentExecutor::new(
+            self.core.clone(),
+            "a2a-client",
+        ));
+        let task_store = Arc::new(protocol_a2a_server::AdapterTaskStore::new(
+            self.store.clone(),
+        ));
+        let card = Arc::new(protocol_a2a_server::AdapterCardProducer::new(
+            self.registry.clone(),
+            protocol_a2a_server::AdapterCardConfig {
+                name: "agent-connector".into(),
+                description: "Universal Agent Adapter Runtime".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                endpoint_url: format!("http://{addr}"),
+            },
+        ));
+        let health = protocol_a2a_server::HealthState::new(
+            self.store.clone(),
+            self.registry.clone(),
+            self.draining.clone(),
+        );
+        let app = protocol_a2a_server::build_router(executor, task_store, card, health);
+
+        let server = tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!(error = %e, "http server error");
+            }
+        });
+
         let _ = signal::ctrl_c().await;
         tracing::info!("shutdown requested");
+        self.draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.cleanup_task.abort();
-        // Future TaskSupervisor performs: stop accepting work -> readiness false
-        // -> wait/cancel active tasks within shutdown_grace -> close protocol streams.
-        let _ = self.core;
+        server.abort();
         tracing::info!("adapterd stopped");
     }
 }

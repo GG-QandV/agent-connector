@@ -28,6 +28,8 @@ pub enum CoreError {
     ResourceExhausted(String),
     #[error("driver error: {0}")]
     Driver(String),
+    #[error("task timed out")]
+    Timeout,
     #[error("store error: {0}")]
     Store(#[from] StoreError),
 }
@@ -66,6 +68,7 @@ pub struct RegisteredAgent {
     pub driver: Arc<dyn AgentDriver>,
     pub limits: AgentLimits,
     permits: Arc<Semaphore>,
+    queue_permits: Arc<Semaphore>,
 }
 impl RegisteredAgent {
     pub fn new(
@@ -76,6 +79,7 @@ impl RegisteredAgent {
     ) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(limits.max_concurrent_tasks)),
+            queue_permits: Arc::new(Semaphore::new(limits.max_queued_tasks)),
             id,
             skills,
             driver,
@@ -98,6 +102,13 @@ impl AgentRegistry {
     }
     pub fn get(&self, id: &AgentId) -> Option<Arc<RegisteredAgent>> {
         self.agents.get(id).map(|v| v.clone())
+    }
+    /// Все зарегистрированные агенты (для agent card и операций-обзора).
+    pub fn agents(&self) -> Vec<Arc<RegisteredAgent>> {
+        self.agents
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
     pub fn resolve(&self, request: &InvokeRequest) -> Result<Arc<RegisteredAgent>, CoreError> {
         if let Some(id) = &request.agent_id {
@@ -224,7 +235,7 @@ impl AdapterCore {
             return Err(CoreError::InvalidRequest("idempotency_key required".into()));
         }
         let agent = self.inner.registry.resolve(&request)?;
-        let task_id = Uuid::new_v4();
+        let task_id = request.task_id.unwrap_or_else(Uuid::new_v4);
         let deadline_at = request
             .deadline
             .and_then(|duration| chrono::Duration::from_std(duration).ok())
@@ -262,9 +273,30 @@ impl AdapterCore {
             )
             .await?;
 
+        // Все проверки лимитов выполняются ДО вызова driver. Очередь —
+        // отдельный bounded semaphore: превышение max_queued_tasks даёт
+        // typed reject, а не ожидание слота.
+        let queue = match agent.queue_permits.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.fail_active(
+                    task_id,
+                    CoreError::ResourceExhausted(format!(
+                        "agent {} queue full (max_queued_tasks={})",
+                        agent.id.0, agent.limits.max_queued_tasks
+                    )),
+                )
+                .await?;
+                return Err(CoreError::ResourceExhausted(format!(
+                    "agent {} queue full",
+                    agent.id.0
+                )));
+            }
+        };
         let global = match self.inner.global_permits.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
+                drop(queue);
                 self.fail_active(
                     task_id,
                     CoreError::ResourceExhausted("global task limit reached".into()),
@@ -278,6 +310,8 @@ impl AdapterCore {
         let per_agent = match agent.permits.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
+                drop(queue);
+                drop(global);
                 self.fail_active(
                     task_id,
                     CoreError::ResourceExhausted(format!("agent {} busy", agent.id.0)),
@@ -289,12 +323,26 @@ impl AdapterCore {
                 )));
             }
         };
+        drop(queue); // задача вышла из очереди и получила слот исполнения
+        let timeout = agent.limits.default_timeout;
         let core = self.clone();
         tokio::spawn(async move {
             let _global = global;
             let _agent = per_agent;
-            if let Err(error) = core.run_driver(agent, task_id, request).await {
-                let _ = core.fail_active(task_id, error).await;
+            // Timeout отменяет driver: если default_timeout истёк, вызываем
+            // cancel у driver и переводим задачу в terminal timeout state.
+            // Сам timeout-future отбрасывается — driver не остаётся висеть.
+            match tokio::time::timeout(timeout, core.run_driver(agent.clone(), task_id, request))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let _ = core.fail_active(task_id, error).await;
+                }
+                Err(_) => {
+                    let _ = agent.driver.cancel(task_id).await;
+                    let _ = core.fail_active(task_id, CoreError::Timeout).await;
+                }
             }
             core.inner.active.remove(&task_id);
         });
@@ -494,7 +542,11 @@ impl AdapterCore {
             TaskState::Failed,
             CoreEventKind::Failed {
                 error: PublicError {
-                    code: "runtime_error".into(),
+                    code: if matches!(error, CoreError::Timeout) {
+                        "timeout".into()
+                    } else {
+                        "runtime_error".into()
+                    },
                     message: error.to_string(),
                     retryable: false,
                 },
