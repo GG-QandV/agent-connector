@@ -1,0 +1,25 @@
+[Unit]
+Description=agent-connector adapterd (Universal Agent Adapter Runtime)
+After=network.target
+
+[Service]
+Type=simple
+User=adapterd
+Group=adapterd
+WorkingDirectory=/opt/agent-connector
+ExecStart=/opt/agent-connector/target/release/adapterd /opt/agent-connector/adapter.yaml
+Restart=on-failure
+RestartSec=3
+EnvironmentFile=-/opt/agent-connector/.env
+# Явный PATH для спавна stdio-агентов
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+# Безопасность
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/agent-connector/data
+
+[Install]
+WantedBy=multi-user.target

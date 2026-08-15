@@ -1,0 +1,13 @@
+[package]
+name = "memory-task-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adapter-model.workspace = true
+adapter-store-contract.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+tokio.workspace = true

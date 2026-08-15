@@ -1,0 +1,17 @@
+[package]
+name = "adapter-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adapter-model.workspace = true
+adapter-store-contract.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true

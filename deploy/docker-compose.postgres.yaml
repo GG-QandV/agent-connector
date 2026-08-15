@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agent-connector-pg
+    environment:
+      POSTGRES_USER: adapter
+      POSTGRES_PASSWORD: adapter
+      POSTGRES_DB: adapter
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

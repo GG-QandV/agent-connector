@@ -1,0 +1,27 @@
+[package]
+name = "adapterd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "adapterd"
+path = "src/main.rs"
+
+[dependencies]
+adapter-model.workspace = true
+adapter-core.workspace = true
+adapter-store-contract.workspace = true
+driver-http-sse.workspace = true
+driver-stdio.workspace = true
+memory-task-store.workspace = true
+postgres-task-store-adapter.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sqlite-task-store-adapter.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+tracing.workspace = true
+url.workspace = true

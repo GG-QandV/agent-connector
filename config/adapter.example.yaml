@@ -1,0 +1,54 @@
+# adapterd — пример конфигурации.
+# Скопируйте в adapter.yaml (или укажите путь аргументом) и задайте секреты
+# через переменные окружения — никогда не коммитьте реальные значения.
+
+mode: local            # local | remote
+
+storage:
+  type: sqlite         # memory | sqlite | postgres
+  path: ./data/adapter.db
+
+# storage:
+#   type: postgres
+#   dsn_env: ADAPTER_PG_DSN
+#   schema: agent_adapter
+#   max_connections: 10
+
+runtime:
+  max_concurrent_tasks: 32
+  cleanup_interval_seconds: 3600
+  shutdown_grace_seconds: 30
+
+retention:
+  task_ttl_days: 7
+  event_ttl_days: 7
+  idempotency_ttl_hours: 24
+  cleanup_batch_size: 1000
+
+agents:
+  - id: stdio-agent
+    skills: [code-review]
+    limits:
+      max_concurrent_tasks: 4
+      max_queued_tasks: 32
+      max_input_bytes: 1048576
+      max_event_bytes: 262144
+      default_timeout_seconds: 900
+    driver: stdio
+    command: ./agent
+    args: []
+    working_dir: null
+    env: {}
+
+  # - id: remote-agent
+  #   skills: [search]
+  #   limits:
+  #     max_concurrent_tasks: 2
+  #     max_queued_tasks: 16
+  #     max_input_bytes: 1048576
+  #     max_event_bytes: 262144
+  #     default_timeout_seconds: 900
+  #   driver: http-sse
+  #   endpoint: https://agent.example.com
+  #   token_env: AGENT_TOKEN
+  #   allow_http_development: false

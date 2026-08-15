@@ -1,0 +1,19 @@
+# Cargo.toml excerpt — pinned official A2A Rust SDK.
+#
+# Pinning exact commit avoids an accidental wire/API change from `main`.
+# Update deliberately: change revision, run integration/interoperability tests,
+# then update this file and Cargo.lock in one PR.
+
+[dependencies]
+a2a = { git = "https://github.com/a2aproject/a2a-rs.git", rev = "02ee56024a485a5f184cbc55d1706918ee1ff809", package = "a2a" }
+a2a-client = { git = "https://github.com/a2aproject/a2a-rs.git", rev = "02ee56024a485a5f184cbc55d1706918ee1ff809", package = "a2a-client" }
+a2a-server = { git = "https://github.com/a2aproject/a2a-rs.git", rev = "02ee56024a485a5f184cbc55d1706918ee1ff809", package = "a2a-server" }
+a2a-slimrpc = { git = "https://github.com/a2aproject/a2a-rs.git", rev = "02ee56024a485a5f184cbc55d1706918ee1ff809", package = "a2a-slimrpc" }
+
+# Feature-gated; do not include in MVP binary by default.
+a2a-grpc = { git = "https://github.com/a2aproject/a2a-rs.git", rev = "02ee56024a485a5f184cbc55d1706918ee1ff809", package = "a2a-grpc", optional = true }
+
+[features]
+default = ["a2a-http"]
+a2a-http = []
+a2a-grpc = ["dep:a2a-grpc"]

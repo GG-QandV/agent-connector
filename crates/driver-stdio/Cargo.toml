@@ -1,0 +1,17 @@
+[package]
+name = "driver-stdio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adapter-core.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "macros", "rt-multi-thread", "sync", "time"] }
+tokio-util.workspace = true
+uuid.workspace = true

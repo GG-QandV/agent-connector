@@ -1,0 +1,11 @@
+[package]
+name = "adapter-store-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adapter-model.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
