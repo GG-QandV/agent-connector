@@ -110,6 +110,14 @@ impl PlatformServiceManager for WindowsService {
         }
     }
 
+    fn restart_service(&self, name: &str) -> Result<(), PlatformError> {
+        require_admin()?;
+        // stop идемпотентен (игнорируем уже-остановленную), затем start.
+        let _ = self.stop_service(name);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        self.start_service(name)
+    }
+
     fn restrict_file_permissions(&self, path: &Path, _owner: &str) -> Result<(), PlatformError> {
         lock_down_read_only(path, "NT SERVICE\\adapterd")
     }

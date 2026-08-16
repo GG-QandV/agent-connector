@@ -64,6 +64,10 @@ pub trait PlatformServiceManager: Send + Sync {
     /// Останавливает службу, НЕ удаляя её регистрацию. Идемпотентно для
     /// уже-остановленной — остановка несуществующей службы не ошибка.
     fn stop_service(&self, name: &str) -> Result<(), PlatformError>;
+    /// Перезапускает службу (stop + start). Платформенно-оптимальный путь:
+    /// Linux — systemctl restart, macOS — kickstart -k (уже kill+start),
+    /// Windows — sc stop (ignore) + sc start.
+    fn restart_service(&self, name: &str) -> Result<(), PlatformError>;
     /// Ограничивает права на файл (chmod 0600+chown / icacls readonly).
     fn restrict_file_permissions(&self, path: &Path, owner: &str) -> Result<(), PlatformError>;
 }

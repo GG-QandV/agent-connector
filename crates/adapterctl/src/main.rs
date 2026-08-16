@@ -5,6 +5,7 @@
 //!   uninstall          — удаление службы и (опционально) данных
 //!   start              — запуск службы adapterd
 //!   stop               — остановка службы adapterd
+//!   restart            — перезапуск службы adapterd
 //!   backup-postgres    — pg_dump managed-docker Postgres в файл
 //!   upgrade-postgres   — смена образа Postgres (обязательный backup перед)
 //!
@@ -34,6 +35,7 @@ enum Command {
     },
     Start,
     Stop,
+    Restart,
     BackupPostgres {
         output: PathBuf,
     },
@@ -149,6 +151,7 @@ fn parse_args() -> Result<Command, String> {
         }
         "start" => Ok(Command::Start),
         "stop" => Ok(Command::Stop),
+        "restart" => Ok(Command::Restart),
         "backup-postgres" => {
             let output = args
                 .first()
@@ -191,7 +194,7 @@ fn print_help() {
     println!("                   [--postgres-dsn DSN] [--confirm-docker] [--docker-network-only]");
     println!("                   [--config PATH] [--skip-build] [--start-now]");
     println!("  adapterctl uninstall [--prefix PATH] [--purge-data]");
-    println!("  adapterctl start | stop");
+    println!("  adapterctl start | stop | restart");
     println!("  adapterctl backup-postgres [OUTPUT.sql]");
     println!("  adapterctl upgrade-postgres <image-tag> [--prefix PATH]");
     println!();
@@ -263,6 +266,12 @@ async fn run() -> Result<(), String> {
         Command::Stop => {
             let platform = platform::platform_manager().map_err(|e| e.to_string())?;
             platform.stop_service("adapterd").map_err(|e| e.to_string())
+        }
+        Command::Restart => {
+            let platform = platform::platform_manager().map_err(|e| e.to_string())?;
+            platform
+                .restart_service("adapterd")
+                .map_err(|e| e.to_string())
         }
         Command::BackupPostgres { output } => {
             postgres_lifecycle::backup(&output)

@@ -141,6 +141,16 @@ impl PlatformServiceManager for Launchd {
         )
     }
 
+    fn restart_service(&self, _name: &str) -> Result<(), PlatformError> {
+        require_root()?;
+        // kickstart -k = kill existing instance if running, then start —
+        // это и есть restart одним вызовом.
+        run_checked(
+            "launchctl", &["kickstart", "-k", &format!("system/{SERVICE_LABEL}")],
+            "launchctl kickstart -k failed — check `sudo launchctl print system/com.agent-connector.adapterd` for diagnostics",
+        )
+    }
+
     fn restrict_file_permissions(&self, path: &Path, owner: &str) -> Result<(), PlatformError> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
