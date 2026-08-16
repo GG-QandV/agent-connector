@@ -17,6 +17,7 @@ use a2a_server::{AgentExecutor, ExecutorContext};
 use adapter_core::{AdapterCore, Caller, CallerId, CoreCommand, CoreError, InvokeRequest};
 use adapter_model::{Part as AdapterPart, TaskId};
 use futures_util::{stream::BoxStream, StreamExt};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -118,34 +119,56 @@ impl AgentExecutor for AdapterAgentExecutor {
                                 (this, state, ctx),
                             ));
                         }
-                        match sub.receiver.recv().await {
-                            Ok(event) => {
-                                let item = event_to_stream_response(&event);
-                                let terminal = matches!(
-                                    event.kind,
-                                    adapter_model::CoreEventKind::Completed { .. }
-                                        | adapter_model::CoreEventKind::Failed { .. }
-                                        | adapter_model::CoreEventKind::Cancelled
-                                );
-                                if terminal {
-                                    state = State::Done;
+                        loop {
+                            match sub.receiver.recv().await {
+                                Ok(event) => {
+                                    // Дубликат: событие уже отдано в history
+                                    // (попалло и в broadcast, и в store до чтения history).
+                                    if sub
+                                        .history_end_seq
+                                        .is_some_and(|end| event.seq <= end)
+                                    {
+                                        continue;
+                                    }
+                                    let item = event_to_stream_response(&event);
+                                    let terminal = matches!(
+                                        event.kind,
+                                        adapter_model::CoreEventKind::Completed { .. }
+                                            | adapter_model::CoreEventKind::Failed { .. }
+                                            | adapter_model::CoreEventKind::Cancelled
+                                    );
+                                    if terminal {
+                                        state = State::Done;
+                                    }
+                                    return Some((Ok(item), (this, state, ctx)));
                                 }
-                                return Some((Ok(item), (this, state, ctx)));
-                            }
-                            Err(broadcast::error::RecvError::Closed) => {
-                                state = State::Done;
-                                return Some((
-                                    Ok(terminal_stream_response(&ctx)),
-                                    (this, state, ctx),
-                                ));
-                            }
-                            Err(broadcast::error::RecvError::Lagged(_)) => {
-                                // gap: клиент должен сделать resume из store.
-                                let err = A2AError::internal(
-                                    "subscription fell behind task history; resume with a cursor",
-                                );
-                                state = State::Done;
-                                return Some((Err(err), (this, state, ctx)));
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    state = State::Done;
+                                    return Some((
+                                        Ok(terminal_stream_response(&ctx)),
+                                        (this, state, ctx),
+                                    ));
+                                }
+                                Err(broadcast::error::RecvError::Lagged(_)) => {
+                                    // gap: клиент должен сделать resume из store.
+                                    // Специфичного A2A-кода для «stream lagged» нет
+                                    // (см. a2a/src/errors.rs, codes): используем
+                                    // INTERNAL_ERROR + TypedDetail с reason, чтобы
+                                    // клиент мог распознать resume-сигнал программно,
+                                    // а не по тексту message.
+                                    let detail = a2a::errordetails::TypedDetail::from_struct(
+                                        HashMap::from([(
+                                            "reason".to_string(),
+                                            serde_json::json!("stream_lagged"),
+                                        )]),
+                                    );
+                                    let err = A2AError::internal(
+                                        "subscription fell behind task history; resume with a cursor",
+                                    )
+                                    .with_details(vec![detail]);
+                                    state = State::Done;
+                                    return Some((Err(err), (this, state, ctx)));
+                                }
                             }
                         }
                     }
@@ -276,10 +299,13 @@ fn event_to_stream_response(event: &adapter_core::CoreEvent) -> StreamResponse {
                 vec![Part::text(error.message.clone())],
             )),
         ),
+        // CancelRequested — запрошена отмена, задача может ещё завершить
+        // полезную работу; это НЕ терминальное состояние (в отличие от
+        // Cancelled). A2A-терминальность stream даёт только Cancelled.
         adapter_model::CoreEventKind::CancelRequested { .. } => status_update(
             task_id,
             context_id,
-            TaskState::Canceled,
+            TaskState::Working,
             Some("cancellation requested".into()),
         ),
         adapter_model::CoreEventKind::Cancelled => task_canceled(task_id, context_id),
@@ -404,7 +430,10 @@ fn map_task_state(state: adapter_model::TaskState) -> TaskState {
     match state {
         S::Created | S::Accepted | S::Running => TaskState::Working,
         S::WaitingForInput => TaskState::InputRequired,
-        S::CancelRequested | S::Cancelled => TaskState::Canceled,
+        // CancelRequested — отмена запрошена, но не завершена (не терминально);
+        // терминальным для A2A является только Cancelled.
+        S::CancelRequested => TaskState::Working,
+        S::Cancelled => TaskState::Canceled,
         S::Completed => TaskState::Completed,
         S::Failed => TaskState::Failed,
     }

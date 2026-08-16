@@ -156,6 +156,10 @@ struct ActiveTask {
 pub struct TaskSubscription {
     pub history: Vec<CoreEvent>,
     pub receiver: broadcast::Receiver<CoreEvent>,
+    /// Максимальный `seq` среди событий в `history`. События из live
+    /// `receiver` с `seq <= history_end_seq` — это дубликаты (успели попасть
+    /// и в history, и в broadcast), их должен отфильтровать потребитель.
+    pub history_end_seq: Option<EventSeq>,
 }
 
 struct CoreInner {
@@ -212,18 +216,42 @@ impl AdapterCore {
         task_id: TaskId,
         after_seq: EventSeq,
     ) -> Result<TaskSubscription, CoreError> {
+        // Подписка на broadcast ПЕРВОЙ: между созданием receiver и чтением
+        // history не может быть потеряно ни одно событие (всё, что broadcast
+        // отправит после подписки, дойдёт до receiver; что отправил раньше —
+        // уже в store). Дубликаты (событие попалло и в history, и в receiver)
+        // потребитель отфильтрует по `history_end_seq`.
+        let receiver = self
+            .inner
+            .active
+            .get(&task_id)
+            .map(|entry| entry.tx.subscribe());
         let history = self
             .inner
             .store
             .events_after(task_id, after_seq, 500)
             .await?;
-        let receiver = self
+        let history_end_seq = history.last().map(|event| event.seq);
+        Ok(TaskSubscription {
+            history,
+            receiver: receiver.unwrap_or_else(closed_receiver),
+            history_end_seq,
+        })
+    }
+
+    /// Pull-модель чтения истории событий без live-подписки.
+    /// Используется для `session/update` (snapshot-ответ): не создаёт
+    /// broadcast-receiver, поэтому нет «мёртвого» канала.
+    pub async fn history(
+        &self,
+        task_id: TaskId,
+        after_seq: EventSeq,
+    ) -> Result<Vec<CoreEvent>, CoreError> {
+        Ok(self
             .inner
-            .active
-            .get(&task_id)
-            .map(|entry| entry.tx.subscribe())
-            .unwrap_or_else(closed_receiver);
-        Ok(TaskSubscription { history, receiver })
+            .store
+            .events_after(task_id, after_seq, 500)
+            .await?)
     }
 
     async fn invoke(

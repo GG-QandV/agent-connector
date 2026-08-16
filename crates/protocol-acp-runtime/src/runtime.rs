@@ -25,6 +25,7 @@ pub trait AcpHandler: Send + Sync {
         task_id: TaskId,
         after_seq: u64,
     ) -> Result<TaskSubscription, CoreError>;
+    async fn history(&self, task_id: TaskId, after_seq: u64) -> Result<Vec<CoreEvent>, CoreError>;
 }
 
 #[async_trait]
@@ -43,11 +44,18 @@ impl AcpHandler for AdapterCore {
     ) -> Result<TaskSubscription, CoreError> {
         self.subscribe(task_id, after_seq).await
     }
+    async fn history(&self, task_id: TaskId, after_seq: u64) -> Result<Vec<CoreEvent>, CoreError> {
+        self.history(task_id, after_seq).await
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct AcpRuntimeConfig {
     pub max_line_bytes: usize,
+    /// Зарезервировано: окно ожидания завершения in-flight запросов после
+    /// `shutdown`. Текущий цикл `run` строго sequential (по одной строке за
+    /// раз), поэтому активных запросов на момент drain нет — поле оставлено
+    /// для будущей конкурентной обработки и не влияет на поведение сейчас.
     pub shutdown_grace: std::time::Duration,
     pub agent_id: String,
     pub agent_name: String,
@@ -266,7 +274,9 @@ impl Dispatcher {
                     id,
                     serde_json::json!({
                         "taskId": snapshot.task_id.to_string(),
-                        "state": format!("{:?}", snapshot.state),
+                        // Стабильная wire-сериализация, а не Debug-вывод:
+                        // формат не зависит от derive(Debug).
+                        "state": serde_json::to_value(snapshot.state).unwrap_or_default(),
                     }),
                 ),
                 Ok(_) => JsonRpcResponse::failure(id, internal_error("unexpected core result")),
@@ -286,14 +296,18 @@ impl Dispatcher {
             .and_then(Value::as_str)
             .and_then(|v| v.parse().ok());
         match task_id {
-            Some(task_id) => match self.core.subscribe(task_id, 0).await {
-                Ok(subscription) => {
-                    let events: Vec<Value> =
-                        subscription.history.iter().map(event_to_json).collect();
-                    JsonRpcResponse::success(id, serde_json::json!({ "events": events }))
+            Some(task_id) => {
+                // session/update — pull-модель: отдаём снимок истории
+                // (клиент пере-поллит при необходимости). Никакой live-подписки
+                // не создаём — это snapshot-ответ по протоколу ACP.
+                match self.core.history(task_id, 0).await {
+                    Ok(events) => {
+                        let events: Vec<Value> = events.iter().map(event_to_json).collect();
+                        JsonRpcResponse::success(id, serde_json::json!({ "events": events }))
+                    }
+                    Err(e) => JsonRpcResponse::failure(id, core_error(e)),
                 }
-                Err(e) => JsonRpcResponse::failure(id, core_error(e)),
-            },
+            }
             None => JsonRpcResponse::failure(id, invalid_request("taskId (UUID) is required")),
         }
     }
@@ -336,7 +350,16 @@ impl<R: AsyncBufRead + Unpin + Send, W: AsyncWrite + Unpin + Send> AcpRuntime<R,
                 }
             };
             if dispatcher.drain_token.is_cancelled() {
-                debug!("draining: dropping new top-level requests");
+                // Draining: молча не дропаем — отвечаем ошибкой, чтобы клиент
+                // знал, что сервер завершает работу и нужно переподключиться.
+                debug!("draining: rejecting new top-level request");
+                if let Ok(Some(request)) = JsonRpcRequest::parse(&line) {
+                    if !request.is_notification() {
+                        let id = request.id.clone();
+                        let err = internal_error("server is shutting down");
+                        write_line(writer, JsonRpcResponse::failure(id, err)).await;
+                    }
+                }
                 continue;
             }
             if line.len() > dispatcher.config.max_line_bytes {
@@ -413,7 +436,8 @@ fn event_to_json(event: &CoreEvent) -> Value {
     serde_json::json!({
         "seq": event.seq,
         "taskId": event.task_id.to_string(),
-        "kind": format!("{:?}", event.kind),
+        // Стабильная wire-сериализация вместо Debug-вывода.
+        "kind": serde_json::to_value(&event.kind).unwrap_or_default(),
     })
 }
 
@@ -473,6 +497,13 @@ mod tests {
             _task_id: TaskId,
             _after_seq: u64,
         ) -> Result<TaskSubscription, CoreError> {
+            Err(CoreError::AgentNotFound("fake".into()))
+        }
+        async fn history(
+            &self,
+            _task_id: TaskId,
+            _after_seq: u64,
+        ) -> Result<Vec<CoreEvent>, CoreError> {
             Err(CoreError::AgentNotFound("fake".into()))
         }
     }

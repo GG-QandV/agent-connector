@@ -153,3 +153,58 @@ impl JsonRpcResponse {
         line
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_request_parses() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#;
+        let request = JsonRpcRequest::parse(line).unwrap().unwrap();
+        assert_eq!(request.method, "session/new");
+        assert_eq!(request.id, Some(JsonRpcId::Number(1)));
+    }
+
+    #[test]
+    fn top_level_array_is_invalid_request_not_parse_error() {
+        // Top-level non-object JSON должен быть invalid_request (-32600),
+        // а НЕ parse_error (-32700): это валидный JSON, но не объект request.
+        let line = r#"[1,2,3]"#;
+        let (error, id) = JsonRpcRequest::parse(line).unwrap_err();
+        assert_eq!(error.code, INVALID_REQUEST);
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn top_level_string_is_invalid_request_with_null_id() {
+        let line = r#""hello""#;
+        let (error, id) = JsonRpcRequest::parse(line).unwrap_err();
+        assert_eq!(error.code, INVALID_REQUEST);
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn malformed_json_is_parse_error() {
+        let line = r#"{"jsonrpc":"2.0","method":"x","id":1,"#;
+        let (error, id) = JsonRpcRequest::parse(line).unwrap_err();
+        assert_eq!(error.code, PARSE_ERROR);
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn wrong_jsonrpc_version_is_invalid_request() {
+        let line = r#"{"jsonrpc":"1.0","id":1,"method":"session/new"}"#;
+        let (error, id) = JsonRpcRequest::parse(line).unwrap_err();
+        assert_eq!(error.code, INVALID_REQUEST);
+        assert_eq!(id, Some(JsonRpcId::Number(1)));
+    }
+
+    #[test]
+    fn missing_method_is_invalid_request() {
+        let line = r#"{"jsonrpc":"2.0","id":2}"#;
+        let (error, id) = JsonRpcRequest::parse(line).unwrap_err();
+        assert_eq!(error.code, INVALID_REQUEST);
+        assert_eq!(id, Some(JsonRpcId::Number(2)));
+    }
+}
