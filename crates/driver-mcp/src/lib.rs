@@ -61,9 +61,26 @@ pub enum McpDriverError {
 
 /// `ClientHandler` — тонкая обёртка над встроенным SDK `ProgressDispatcher`.
 /// SDK сам маршрутизирует notification к нужному подписчику по токену.
-#[derive(Clone, Default)]
+/// Дополнительно ретранслирует `notifications/tools/list_changed` через
+/// mpsc-канал: `McpClientHandler` создаётся ДО `McpDriver` (тот же порядок,
+/// что для progress), поэтому обратная ссылка на driver невозможна — канал
+/// решает конструирование без цикла: Sender создаётся раньше, Receiver
+/// слушается background-задачей уже после появления `Arc<McpDriver>`.
+#[derive(Clone)]
 struct McpClientHandler {
     progress: ProgressDispatcher,
+    /// capacity 1 + try_send: если сигнал уже в очереди, второй не нужен —
+    /// background-задача всё равно сделает полный re-discovery.
+    list_changed_tx: tokio::sync::mpsc::Sender<()>,
+}
+
+impl McpClientHandler {
+    fn new(list_changed_tx: tokio::sync::mpsc::Sender<()>) -> Self {
+        Self {
+            progress: ProgressDispatcher::default(),
+            list_changed_tx,
+        }
+    }
 }
 
 impl ClientHandler for McpClientHandler {
@@ -74,12 +91,30 @@ impl ClientHandler for McpClientHandler {
     ) {
         self.progress.handle_notification(params).await;
     }
+
+    // Типизированный метод SDK (rmcp 0.8.5 handler/client.rs): диспатчится
+    // автоматически из ServerNotification::ToolListChangedNotification.
+    // try_send, не send().await — не блокироваться и не паниковать, если
+    // сигнал уже в очереди (re-discovery всё равно покроет всё).
+    async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
+        if self.list_changed_tx.try_send(()).is_err() {
+            tracing::debug!(
+                "list_changed signal already pending, background watcher will still re-discover"
+            );
+        }
+    }
 }
 
 type McpSession = rmcp::service::RunningService<RoleClient, McpClientHandler>;
 
 pub struct McpDriver {
     id: String,
+    /// id агента в `AgentRegistry` — нужен background-задаче list_changed
+    /// для поиска `RegisteredAgent` при hot-update skills.
+    agent_id: adapter_model::AgentId,
+    /// Weak (не Arc) — не создавать цикл владения Registry -> Agent -> Driver
+    /// -> Registry; upgrade() вернёт None после shutdown registry.
+    registry: std::sync::Weak<adapter_core::AgentRegistry>,
     session: Arc<McpSession>,
     handler: McpClientHandler,
     /// Tool name -> input_schema (JSON Schema) для валидации input до вызова.
@@ -98,20 +133,33 @@ impl McpDriver {
         config: McpStdioConfig,
         allowed_tools: Vec<String>,
         default_timeout: Duration,
-    ) -> Result<Self, McpDriverError> {
+        agent_id: adapter_model::AgentId,
+        registry: std::sync::Weak<adapter_core::AgentRegistry>,
+    ) -> Result<Arc<Self>, McpDriverError> {
         let mut command = Command::new(&config.command);
         command.args(&config.args).envs(&config.env);
         let transport =
             TokioChildProcess::new(command).map_err(|e| McpDriverError::Spawn(e.to_string()))?;
 
-        let handler = McpClientHandler::default();
+        let (list_changed_tx, list_changed_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let handler = McpClientHandler::new(list_changed_tx);
         let session = handler
             .clone()
             .serve(transport)
             .await
             .map_err(|e| McpDriverError::Connect(e.to_string()))?;
 
-        Self::from_session(id, session, handler, allowed_tools, default_timeout).await
+        Self::from_session(
+            id,
+            agent_id,
+            registry,
+            session,
+            handler,
+            list_changed_rx,
+            allowed_tools,
+            default_timeout,
+        )
+        .await
     }
 
     /// Streamable HTTP транспорт (MCP 2025-03-26 spec). Токен кладётся в
@@ -122,7 +170,9 @@ impl McpDriver {
         config: McpHttpConfig,
         allowed_tools: Vec<String>,
         default_timeout: Duration,
-    ) -> Result<Self, McpDriverError> {
+        agent_id: adapter_model::AgentId,
+        registry: std::sync::Weak<adapter_core::AgentRegistry>,
+    ) -> Result<Arc<Self>, McpDriverError> {
         let client = reqwest::Client::new();
         let mut transport_config =
             rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
@@ -133,36 +183,101 @@ impl McpDriver {
         }
         let transport = StreamableHttpClientTransport::with_client(client, transport_config);
 
-        let handler = McpClientHandler::default();
+        let (list_changed_tx, list_changed_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let handler = McpClientHandler::new(list_changed_tx);
         let session = handler
             .clone()
             .serve(transport)
             .await
             .map_err(|e| McpDriverError::Connect(e.to_string()))?;
 
-        Self::from_session(id, session, handler, allowed_tools, default_timeout).await
+        Self::from_session(
+            id,
+            agent_id,
+            registry,
+            session,
+            handler,
+            list_changed_rx,
+            allowed_tools,
+            default_timeout,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn from_session(
         id: impl Into<String>,
+        agent_id: adapter_model::AgentId,
+        registry: std::sync::Weak<adapter_core::AgentRegistry>,
         session: McpSession,
         handler: McpClientHandler,
+        list_changed_rx: tokio::sync::mpsc::Receiver<()>,
         allowed_tools: Vec<String>,
         default_timeout: Duration,
-    ) -> Result<Self, McpDriverError> {
-        let driver = Self {
+    ) -> Result<Arc<Self>, McpDriverError> {
+        let driver = Arc::new(Self {
             id: id.into(),
+            agent_id,
+            registry,
             session: Arc::new(session),
             handler,
             tool_schemas: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             allowed_tools,
             default_timeout,
             active_handles: Arc::new(DashMap::new()),
-        };
+        });
 
         driver.verify_protocol_version()?;
         driver.discover_tools().await?;
+
+        // Background-задача: реагирует на notifications/tools/list_changed.
+        // Держит Weak<McpDriver> (не Arc — не мешать shutdown) + Weak<AgentRegistry>
+        // (не создавать цикл). Канал решает порядок конструирования: Sender
+        // передан handler'у ДО того, как эта задача начала слушать Receiver.
+        driver.spawn_list_changed_watcher(list_changed_rx);
+
         Ok(driver)
+    }
+
+    /// Background-задача hot-update skills при tools/list_changed (ADR-0001
+    /// Решение 1). При сигнале: полный re-discovery, затем обновление
+    /// `RegisteredAgent.skills` через `update_skills()`. Если registry или
+    /// сам агент уже сброшены — задача завершается.
+    fn spawn_list_changed_watcher(self: &Arc<Self>, mut rx: tokio::sync::mpsc::Receiver<()>) {
+        let driver = Arc::downgrade(self);
+        let registry = self.registry.clone();
+        let agent_id = self.agent_id.clone();
+        tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                let Some(driver) = driver.upgrade() else {
+                    tracing::debug!("driver dropped, stopping list_changed watcher");
+                    break;
+                };
+                if let Err(e) = driver.discover_tools().await {
+                    tracing::warn!(
+                        agent_id = %agent_id.0,
+                        error = %e,
+                        "re-discovery after tools/list_changed failed, keeping stale skill list"
+                    );
+                    continue;
+                }
+                let Some(registry) = registry.upgrade() else {
+                    tracing::debug!("registry dropped, stopping list_changed watcher");
+                    break;
+                };
+                let Some(agent) = registry.get(&agent_id) else {
+                    tracing::warn!(agent_id = %agent_id.0, "agent no longer in registry, stopping watcher");
+                    break;
+                };
+                // В skills идут только имена tools (ключи tool_schemas);
+                // сами схемы (input_schema) остаются в driver.tool_schemas —
+                // не дублируются в AgentRegistry.
+                let new_skills: Vec<String> =
+                    driver.tool_schemas.read().await.keys().cloned().collect();
+                agent.update_skills(new_skills);
+                tracing::info!(agent_id = %agent_id.0, "skills hot-updated after tools/list_changed");
+            }
+        });
     }
 
     /// Проверка версии MCP-протокола сервера после initialize (см. spec §7).

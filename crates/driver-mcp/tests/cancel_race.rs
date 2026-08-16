@@ -84,6 +84,8 @@ async fn cancel_or_complete_never_both_and_channel_closes() {
         counter_config(),
         vec!["delayed".to_string()],
         Duration::from_secs(30),
+        adapter_model::AgentId("test-counter".into()),
+        std::sync::Weak::new(),
     )
     .await
     .expect("connect to counter server");
@@ -134,6 +136,8 @@ async fn concurrent_cancel_storm_exact_one_event_per_task() {
             counter_config(),
             vec!["delayed".to_string()],
             Duration::from_secs(30),
+            adapter_model::AgentId("test-counter".into()),
+            std::sync::Weak::new(),
         )
         .await
         .expect("connect to counter server"),
