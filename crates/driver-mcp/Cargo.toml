@@ -9,17 +9,20 @@ repository.workspace = true
 adapter-core = { path = "../adapter-core" }
 adapter-model = { path = "../adapter-model" }
 async-trait = { workspace = true }
+axum = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
-rmcp = { version = "0.8", features = ["client", "transport-child-process", "server", "macros", "transport-io", "schemars"] }
+rmcp = { version = "0.8", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "transport-streamable-http-server", "server", "macros", "transport-io", "schemars"] }
 serde_json = { workspace = true }
+serde = { workspace = true }
+reqwest = { workspace = true }
+jsonschema = "0.49"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "io-std", "signal"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-serde = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 

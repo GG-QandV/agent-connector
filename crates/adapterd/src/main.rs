@@ -15,7 +15,7 @@ use adapter_core::{
 use adapter_store_contract::TaskStore;
 use config::{AgentTransportConfig, AuthConfig, Config, McpTransportConfig, StorageConfig};
 use driver_http_sse::{Credential, HttpSseDriver, HttpSseDriverConfig};
-use driver_mcp::{McpDriver, McpDriverError, McpStdioConfig};
+use driver_mcp::{McpDriver, McpDriverError, McpHttpConfig, McpStdioConfig};
 use driver_stdio::{StdioDriver, StdioDriverConfig};
 use memory_task_store::MemoryTaskStore;
 use postgres_task_store_adapter::PostgresTaskStore;
@@ -69,12 +69,31 @@ impl Daemon {
         let store = build_store(&config).await?;
         let registry = Arc::new(AgentRegistry::new());
         for agent in &config.agents {
-            let driver = build_driver(agent).await?;
-            registry.register(RegisteredAgent::new(
-                adapter_model::AgentId(agent.id.clone()),
-                agent.skills.clone(),
-                driver,
-                config.agent_limits(agent),
+            match build_driver(agent).await {
+                Ok(driver) => {
+                    registry.register(RegisteredAgent::new(
+                        adapter_model::AgentId(agent.id.clone()),
+                        agent.skills.clone(),
+                        driver,
+                        config.agent_limits(agent),
+                    ));
+                }
+                Err(error) => {
+                    // Graceful degradation: агент не поднялся (например MCP
+                    // discovery timeout) — логируем и продолжаем с остальными.
+                    // Весь процесс не падает из-за одного сломанного агента
+                    // (docs/driver-mcp-spec.md раздел 5 п.6).
+                    tracing::error!(
+                        agent = %agent.id,
+                        error = %error,
+                        "agent failed to start, skipping"
+                    );
+                }
+            }
+        }
+        if registry.agents().is_empty() {
+            return Err(StartupError::Driver(
+                "no agents started successfully".into(),
             ));
         }
         let auth_state = build_auth_state(&config.auth)?;
@@ -238,27 +257,65 @@ async fn build_driver(agent: &config::AgentConfig) -> Result<Arc<dyn AgentDriver
             allowed_tools,
             discovery_timeout_seconds,
         } => {
-            let _ = discovery_timeout_seconds; // discovery выполняется в connect_*; см. spec раздел 5
-            let driver = match transport {
-                McpTransportConfig::Stdio { command, args, env } => McpDriver::connect_stdio(
-                    agent.id.clone(),
-                    McpStdioConfig {
-                        command: command.clone(),
-                        args: args.clone(),
-                        env: env.clone(),
-                    },
-                    allowed_tools.clone(),
-                    Duration::from_secs(agent.limits.default_timeout_seconds),
-                )
-                .await
-                .map_err(|e: McpDriverError| StartupError::Driver(e.to_string()))?,
-                McpTransportConfig::Http { .. } => {
-                    return Err(StartupError::Driver(
-                        "MCP HTTP transport not yet implemented".into(),
-                    ));
-                }
+            let connect = async {
+                let driver = match transport {
+                    McpTransportConfig::Stdio { command, args, env } => McpDriver::connect_stdio(
+                        agent.id.clone(),
+                        McpStdioConfig {
+                            command: command.clone(),
+                            args: args.clone(),
+                            env: env.clone(),
+                        },
+                        allowed_tools.clone(),
+                        Duration::from_secs(agent.limits.default_timeout_seconds),
+                    )
+                    .await
+                    .map_err(|e: McpDriverError| StartupError::Driver(e.to_string()))?,
+                    McpTransportConfig::Http {
+                        endpoint,
+                        token_env,
+                        allow_http_development,
+                    } => {
+                        if !*allow_http_development && !endpoint.starts_with("https://") {
+                            return Err(StartupError::Driver(format!(
+                                "agent {} MCP HTTP endpoint must use https",
+                                agent.id
+                            )));
+                        }
+                        let token = match token_env {
+                            Some(name) => Some(
+                                env::var(name)
+                                    .map_err(|_| StartupError::MissingEnv(name.clone()))?,
+                            ),
+                            None => None,
+                        };
+                        McpDriver::connect_http(
+                            agent.id.clone(),
+                            McpHttpConfig {
+                                endpoint: endpoint.clone(),
+                                token,
+                            },
+                            allowed_tools.clone(),
+                            Duration::from_secs(agent.limits.default_timeout_seconds),
+                        )
+                        .await
+                        .map_err(|e: McpDriverError| StartupError::Driver(e.to_string()))?
+                    }
+                };
+                Ok::<_, StartupError>(Arc::new(driver) as Arc<dyn AgentDriver>)
             };
-            Ok(Arc::new(driver))
+            // discovery_timeout_seconds ограничивает весь connect + tools/list.
+            // Если discovery не уложился — агент не поднимается, остальные
+            // продолжают (graceful degradation, см. Daemon::build).
+            match tokio::time::timeout(Duration::from_secs(*discovery_timeout_seconds), connect)
+                .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => Err(StartupError::Driver(format!(
+                    "agent {} MCP discovery timed out after {}s",
+                    agent.id, discovery_timeout_seconds
+                ))),
+            }
         }
     }
 }

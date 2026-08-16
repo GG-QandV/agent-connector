@@ -1,16 +1,15 @@
 //! `driver-mcp` — MCP client backend для `adapter_core::AgentDriver`.
 //!
-//! Перенесено из `docs/design/driver_mcp_TRULY_FINAL.rs` (API-verified против
-//! github.com/modelcontextprotocol/rust-sdk, commit f713ebd1a6feab492fb730a8bc13026be114d82f,
-//! см. `docs/design/rmcp-api-verification.md`).
+//! Реализует `AgentDriver` поверх MCP client-соединения к внешнему MCP-серверу.
+//! Поддерживаются два транспорта: stdio (child-процесс) и Streamable HTTP
+//! (rmcp 0.8.5, reqwest). Progress транслируется в `DriverEvent::Progress`,
+//! отмена — через `CancellationToken`, который `tokio::select!` внутри
+//! spawn'нутой задачи превращает в `notifications/cancelled`.
 //!
-//! Доработка относительно референса — закрытие единственного ownership-пробела
-//! в `cancel()` (вариант (б) из комментария в референсе):
-//! `RequestHandle` целиком живёт внутри spawn'нутой задачи, снаружи через
-//! `active_handles: DashMap<TaskId, CancellationToken>` передаётся только сигнал
-//! отмены. `cancel()` снаружи вызывает `cancel_token.cancel()`, а внутри задачи
-//! `tokio::select!` реагирует на это и вызывает `handle.cancel(reason)` там, где
-//! handle реально доступен. Moved-value конфликт устранён без unsafe.
+//! Дополнительно к базовому циклу invoke/complete/cancel:
+//! - проверка версии MCP-протокола сервера после `initialize`;
+//! - валидация `request.input` против сохранённой `inputSchema` до `tools/call`
+//!   (безопасность, docs/driver-mcp-spec.md §8).
 
 use adapter_core::{AgentDriver, CoreError, DriverCapabilities, DriverEvent};
 use adapter_model::{InvokeRequest, Part, PublicError, TaskId};
@@ -24,7 +23,7 @@ use rmcp::{
         ProgressNotificationParam, RawContent, ServerResult,
     },
     service::{NotificationContext, PeerRequestOptions, RequestHandle, RoleClient},
-    transport::TokioChildProcess,
+    transport::{StreamableHttpClientTransport, TokioChildProcess},
     ServiceError, ServiceExt,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
@@ -38,6 +37,16 @@ pub struct McpStdioConfig {
     pub env: HashMap<String, String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct McpHttpConfig {
+    pub endpoint: String,
+    pub token: Option<String>,
+}
+
+/// Версии MCP-протокола, которые `driver-mcp` принимает от сервера.
+/// Поддержка одной версии назад от текущей стабильной (2025-03-26).
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
 #[derive(thiserror::Error, Debug)]
 pub enum McpDriverError {
     #[error("failed to spawn MCP stdio transport: {0}")]
@@ -46,10 +55,11 @@ pub enum McpDriverError {
     Connect(String),
     #[error("MCP tools/list failed: {0}")]
     ToolsList(String),
+    #[error("unsupported MCP protocol version: {0}")]
+    UnsupportedProtocolVersion(String),
 }
 
 /// `ClientHandler` — тонкая обёртка над встроенным SDK `ProgressDispatcher`.
-/// Никакого самодельного `DashMap<String, Sender>` больше не требуется:
 /// SDK сам маршрутизирует notification к нужному подписчику по токену.
 #[derive(Clone, Default)]
 struct McpClientHandler {
@@ -72,7 +82,8 @@ pub struct McpDriver {
     id: String,
     session: Arc<McpSession>,
     handler: McpClientHandler,
-    tool_names: Arc<tokio::sync::RwLock<Vec<String>>>,
+    /// Tool name -> input_schema (JSON Schema) для валидации input до вызова.
+    tool_schemas: Arc<tokio::sync::RwLock<HashMap<String, serde_json::Value>>>,
     allowed_tools: Vec<String>,
     default_timeout: Duration,
     /// Активные запросы: TaskId -> CancellationToken. RequestHandle целиком
@@ -94,34 +105,87 @@ impl McpDriver {
             TokioChildProcess::new(command).map_err(|e| McpDriverError::Spawn(e.to_string()))?;
 
         let handler = McpClientHandler::default();
-
-        // Подтверждённая форма (progress_client.rs): serve() на handler'е.
-        // ClientHandler требует Clone в этой реализации (McpClientHandler
-        // выше derive(Clone)), поэтому клонируем перед передачей в serve(),
-        // сохраняя оригинал у себя для последующего subscribe().
         let session = handler
             .clone()
             .serve(transport)
             .await
             .map_err(|e| McpDriverError::Connect(e.to_string()))?;
 
+        Self::from_session(id, session, handler, allowed_tools, default_timeout).await
+    }
+
+    /// Streamable HTTP транспорт (MCP 2025-03-26 spec). Токен кладётся в
+    /// Authorization: Bearer header; TLS-проверка — ответственность конфига
+    /// (`allow_http_development` в adapterd-config, см. main.rs).
+    pub async fn connect_http(
+        id: impl Into<String>,
+        config: McpHttpConfig,
+        allowed_tools: Vec<String>,
+        default_timeout: Duration,
+    ) -> Result<Self, McpDriverError> {
+        let client = reqwest::Client::new();
+        let mut transport_config =
+            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+                config.endpoint,
+            );
+        if let Some(token) = config.token {
+            transport_config = transport_config.auth_header(format!("Bearer {token}"));
+        }
+        let transport = StreamableHttpClientTransport::with_client(client, transport_config);
+
+        let handler = McpClientHandler::default();
+        let session = handler
+            .clone()
+            .serve(transport)
+            .await
+            .map_err(|e| McpDriverError::Connect(e.to_string()))?;
+
+        Self::from_session(id, session, handler, allowed_tools, default_timeout).await
+    }
+
+    async fn from_session(
+        id: impl Into<String>,
+        session: McpSession,
+        handler: McpClientHandler,
+        allowed_tools: Vec<String>,
+        default_timeout: Duration,
+    ) -> Result<Self, McpDriverError> {
         let driver = Self {
             id: id.into(),
             session: Arc::new(session),
             handler,
-            tool_names: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            tool_schemas: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             allowed_tools,
             default_timeout,
             active_handles: Arc::new(DashMap::new()),
         };
 
+        driver.verify_protocol_version()?;
         driver.discover_tools().await?;
         Ok(driver)
     }
 
+    /// Проверка версии MCP-протокола сервера после initialize (см. spec §7).
+    fn verify_protocol_version(&self) -> Result<(), McpDriverError> {
+        let Some(info) = self.session.peer().peer_info() else {
+            return Err(McpDriverError::UnsupportedProtocolVersion(
+                "no server info available after initialize".into(),
+            ));
+        };
+        let version = info.protocol_version.to_string();
+        if SUPPORTED_PROTOCOL_VERSIONS.contains(&version.as_str()) {
+            Ok(())
+        } else {
+            Err(McpDriverError::UnsupportedProtocolVersion(format!(
+                "{version} (supported: {})",
+                SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+            )))
+        }
+    }
+
     async fn discover_tools(&self) -> Result<(), McpDriverError> {
         let mut cursor: Option<PaginatedRequestParam> = None;
-        let mut discovered = Vec::new();
+        let mut discovered = HashMap::new();
         loop {
             let page = self
                 .session
@@ -131,7 +195,9 @@ impl McpDriver {
             for tool in page.tools {
                 let name = tool.name.to_string();
                 if self.allowed_tools.is_empty() || self.allowed_tools.contains(&name) {
-                    discovered.push(name);
+                    let schema = serde_json::to_value(&tool.input_schema)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    discovered.insert(name, schema);
                 }
             }
             match page.next_cursor {
@@ -139,7 +205,7 @@ impl McpDriver {
                 None => break,
             }
         }
-        *self.tool_names.write().await = discovered;
+        *self.tool_schemas.write().await = discovered;
         Ok(())
     }
 
@@ -166,6 +232,44 @@ impl McpDriver {
             }
         }
         merged
+    }
+
+    /// Валидация сформированных arguments против сохранённой inputSchema
+    /// (spec §8): быстрый понятный `InvalidRequest` до отправки tools/call,
+    /// а не непрозрачная MCP-ошибка.
+    async fn validate_input(
+        &self,
+        skill_id: &str,
+        arguments: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), CoreError> {
+        let schema = self.tool_schemas.read().await.get(skill_id).cloned();
+        let Some(schema) = schema else {
+            return Err(CoreError::InvalidRequest(format!(
+                "unknown or disallowed MCP tool: {skill_id}"
+            )));
+        };
+        let Ok(validator) = jsonschema::validator_for(&schema) else {
+            // Сервер отдал невалидную схему — не можем проверить, пропускаем.
+            // Это безопаснее, чем блокировать все вызовы из-за кривого сервера.
+            tracing::warn!(
+                skill_id,
+                "invalid inputSchema from server, skipping validation"
+            );
+            return Ok(());
+        };
+        let value = serde_json::Value::Object(arguments.clone());
+        let errors: Vec<String> = validator
+            .iter_errors(&value)
+            .map(|error| error.to_string())
+            .take(3)
+            .collect();
+        if !errors.is_empty() {
+            return Err(CoreError::InvalidRequest(format!(
+                "MCP tool {skill_id} input validation failed: {}",
+                errors.join("; ")
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -220,16 +324,9 @@ impl AgentDriver for McpDriver {
             .clone()
             .ok_or_else(|| CoreError::InvalidRequest("skill_id required for MCP driver".into()))?;
 
-        {
-            let names = self.tool_names.read().await;
-            if !names.iter().any(|n| n == &skill_id) {
-                return Err(CoreError::InvalidRequest(format!(
-                    "unknown or disallowed MCP tool: {skill_id}"
-                )));
-            }
-        }
-
         let arguments = self.part_to_arguments(&request.input);
+        self.validate_input(&skill_id, &arguments).await?;
+
         let params = CallToolRequestParam {
             name: skill_id.clone().into(),
             arguments: Some(arguments),
@@ -268,7 +365,7 @@ impl AgentDriver for McpDriver {
         // отдать в await_response() в основной ветке select!. Поэтому
         // клонируем peer (Clone) и id до этого и в cancel-ветке отправляем
         // CancelledNotification вручную — 1:1 код handle.cancel() из SDK
-        // (service.rs:655 / 0.8.5 service.rs:281).
+        // (0.8.5 service.rs:281).
         let cancel_peer = handle.peer.clone();
         let cancel_request_id = handle.id.clone();
 
@@ -295,7 +392,7 @@ impl AgentDriver for McpDriver {
                 })
             };
 
-            // RequestHandle доступен здесь — именно тут вызываем handle.cancel()
+            // RequestHandle доступен здесь — именно тут выполняем handle.cancel()
             // при внешнем сигнале отмены через cancel_token.
             let outcome = tokio::select! {
                 result = tokio::time::timeout(timeout, handle.await_response()) => {
