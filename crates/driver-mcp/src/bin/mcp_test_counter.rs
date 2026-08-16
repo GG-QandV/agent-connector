@@ -32,6 +32,11 @@ pub struct EchoRequest {
     pub message: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DelayedRequest {
+    pub delay_ms: u64,
+}
+
 #[tool_router(router = tool_router)]
 impl Counter {
     pub fn new() -> Self {
@@ -60,6 +65,15 @@ impl Counter {
         Parameters(request): Parameters<EchoRequest>,
     ) -> Result<String, rmcp::ErrorData> {
         Ok(request.message)
+    }
+
+    #[tool(description = "Sleep for delay_ms then return a fixed string")]
+    async fn delayed(
+        &self,
+        Parameters(request): Parameters<DelayedRequest>,
+    ) -> Result<String, rmcp::ErrorData> {
+        tokio::time::sleep(Duration::from_millis(request.delay_ms)).await;
+        Ok(format!("slept {}ms", request.delay_ms))
     }
 
     #[tool(description = "Long running task example")]
