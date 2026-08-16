@@ -13,8 +13,9 @@ use adapter_core::{
     TokenGrant,
 };
 use adapter_store_contract::TaskStore;
-use config::{AgentTransportConfig, AuthConfig, Config, StorageConfig};
+use config::{AgentTransportConfig, AuthConfig, Config, McpTransportConfig, StorageConfig};
 use driver_http_sse::{Credential, HttpSseDriver, HttpSseDriverConfig};
+use driver_mcp::{McpDriver, McpDriverError, McpStdioConfig};
 use driver_stdio::{StdioDriver, StdioDriverConfig};
 use memory_task_store::MemoryTaskStore;
 use postgres_task_store_adapter::PostgresTaskStore;
@@ -230,6 +231,33 @@ async fn build_driver(agent: &config::AgentConfig) -> Result<Arc<dyn AgentDriver
             };
             let driver =
                 HttpSseDriver::new(config).map_err(|e| StartupError::Driver(e.to_string()))?;
+            Ok(Arc::new(driver))
+        }
+        AgentTransportConfig::Mcp {
+            transport,
+            allowed_tools,
+            discovery_timeout_seconds,
+        } => {
+            let _ = discovery_timeout_seconds; // discovery выполняется в connect_*; см. spec раздел 5
+            let driver = match transport {
+                McpTransportConfig::Stdio { command, args, env } => McpDriver::connect_stdio(
+                    agent.id.clone(),
+                    McpStdioConfig {
+                        command: command.clone(),
+                        args: args.clone(),
+                        env: env.clone(),
+                    },
+                    allowed_tools.clone(),
+                    Duration::from_secs(agent.limits.default_timeout_seconds),
+                )
+                .await
+                .map_err(|e: McpDriverError| StartupError::Driver(e.to_string()))?,
+                McpTransportConfig::Http { .. } => {
+                    return Err(StartupError::Driver(
+                        "MCP HTTP transport not yet implemented".into(),
+                    ));
+                }
+            };
             Ok(Arc::new(driver))
         }
     }

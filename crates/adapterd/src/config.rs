@@ -182,6 +182,45 @@ pub enum AgentTransportConfig {
         #[serde(default)]
         allow_http_development: bool,
     },
+    Mcp {
+        /// Транспорт до самого MCP-сервера: как rmcp соединяется с ним.
+        #[serde(flatten)]
+        transport: McpTransportConfig,
+        /// Явный allowlist tool names, которые должны стать skills. Пусто =
+        /// все tools сервера (не рекомендуется для remote/public profile —
+        /// см. docs/driver-mcp-spec.md раздел безопасности).
+        #[serde(default)]
+        allowed_tools: Vec<String>,
+        /// Таймаут на discovery (tools/list) при старте.
+        #[serde(default = "default_mcp_discovery_timeout")]
+        discovery_timeout_seconds: u64,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "mcp_transport", rename_all = "kebab-case")]
+pub enum McpTransportConfig {
+    Stdio {
+        command: PathBuf,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+    },
+    /// HTTP-транспорт MCP-сервера описан в спеке, но не реализован
+    /// (driver возвращает явную ошибку при старте).
+    #[allow(dead_code)]
+    Http {
+        endpoint: String,
+        #[serde(default)]
+        token_env: Option<String>,
+        #[serde(default)]
+        allow_http_development: bool,
+    },
+}
+
+fn default_mcp_discovery_timeout() -> u64 {
+    10
 }
 
 #[derive(Error, Debug)]
@@ -236,6 +275,18 @@ impl Config {
                 if !*allow_http_development && !endpoint.starts_with("https://") {
                     return Err(ConfigError::Validation(format!(
                         "agent {} HTTP/SSE endpoint must use https",
+                        agent.id
+                    )));
+                }
+            }
+            // MCP: allowed_tools обязателен вне local profile. Пустой allowlist
+            // (разрешить все tools сервера) допустим только в local/dev —
+            // симметрично правилу "не принимать произвольные external agent
+            // endpoints" (docs/driver-mcp-spec.md раздел безопасности).
+            if let AgentTransportConfig::Mcp { allowed_tools, .. } = &agent.transport {
+                if matches!(self.mode, Mode::Remote) && allowed_tools.is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "agent {} MCP driver requires allowed_tools in remote mode",
                         agent.id
                     )));
                 }

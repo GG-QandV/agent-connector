@@ -1,0 +1,28 @@
+[package]
+name = "driver-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adapter-core = { path = "../adapter-core" }
+adapter-model = { path = "../adapter-model" }
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+futures-util = { workspace = true }
+rmcp = { version = "0.8", features = ["client", "transport-child-process", "server", "macros", "transport-io", "schemars"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "io-std", "signal"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[[bin]]
+name = "mcp_test_counter"
+path = "src/bin/mcp_test_counter.rs"
