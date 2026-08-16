@@ -61,6 +61,9 @@ pub trait PlatformServiceManager: Send + Sync {
     fn unregister_service(&self, name: &str) -> Result<(), PlatformError>;
     /// Запускает службу.
     fn start_service(&self, name: &str) -> Result<(), PlatformError>;
+    /// Останавливает службу, НЕ удаляя её регистрацию. Идемпотентно для
+    /// уже-остановленной — остановка несуществующей службы не ошибка.
+    fn stop_service(&self, name: &str) -> Result<(), PlatformError>;
     /// Ограничивает права на файл (chmod 0600+chown / icacls readonly).
     fn restrict_file_permissions(&self, path: &Path, owner: &str) -> Result<(), PlatformError>;
 }

@@ -262,9 +262,7 @@ async fn run() -> Result<(), String> {
         }
         Command::Stop => {
             let platform = platform::platform_manager().map_err(|e| e.to_string())?;
-            platform
-                .unregister_service("adapterd")
-                .map_err(|e| e.to_string())
+            platform.stop_service("adapterd").map_err(|e| e.to_string())
         }
         Command::BackupPostgres { output } => {
             postgres_lifecycle::backup(&output)

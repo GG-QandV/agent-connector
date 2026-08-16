@@ -111,6 +111,16 @@ impl PlatformServiceManager for Systemd {
         )
     }
 
+    fn stop_service(&self, name: &str) -> Result<(), PlatformError> {
+        require_root()?;
+        // systemctl stop идемпотентен для уже-остановленной службы (exit 0).
+        run_checked(
+            "systemctl",
+            &["stop", name],
+            "systemctl stop failed — check `journalctl -u adapterd -e` for details",
+        )
+    }
+
     fn restrict_file_permissions(&self, path: &Path, owner: &str) -> Result<(), PlatformError> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))

@@ -129,6 +129,18 @@ impl PlatformServiceManager for Launchd {
         )
     }
 
+    fn stop_service(&self, _name: &str) -> Result<(), PlatformError> {
+        require_root()?;
+        // SIGTERM останавливает процесс; при graceful shutdown (exit 0)
+        // KeepAlive {SuccessfulExit: false} НЕ перезапускает его — это
+        // штатная остановка, а не сбой (в отличие от launchctl bootout,
+        // который выгружает job целиком).
+        run_checked(
+            "launchctl", &["kill", "SIGTERM", &format!("system/{SERVICE_LABEL}")],
+            "launchctl kill SIGTERM failed — is the service running? `sudo launchctl print system/com.agent-connector.adapterd`",
+        )
+    }
+
     fn restrict_file_permissions(&self, path: &Path, owner: &str) -> Result<(), PlatformError> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))

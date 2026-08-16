@@ -82,8 +82,9 @@ impl PlatformServiceManager for WindowsService {
 
     fn unregister_service(&self, name: &str) -> Result<(), PlatformError> {
         require_admin()?;
-        let _ = Command::new("sc.exe").args(["stop", name]).status();
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // stop может вернуть ненулевой код, если служба уже остановлена —
+        // не фейлим на этом, только на delete.
+        let _ = self.stop_service(name);
         run_checked("sc.exe", &["delete", name], "sc.exe delete failed")?;
         Ok(())
     }
@@ -95,6 +96,18 @@ impl PlatformServiceManager for WindowsService {
             &["start", name],
             "sc.exe start failed — check Get-EventLog -LogName Application -Source adapterd",
         )
+    }
+
+    fn stop_service(&self, name: &str) -> Result<(), PlatformError> {
+        require_admin()?;
+        // sc.exe stop на уже-остановленной службе возвращает ошибку — это
+        // штатное состояние, не фейлим: остановка идемпотентна.
+        match Command::new("sc.exe").args(["stop", name]).status() {
+            Ok(_) => Ok(()),
+            Err(e) => Err(PlatformError::CommandFailed(format!(
+                "sc.exe stop spawn failed: {e}"
+            ))),
+        }
     }
 
     fn restrict_file_permissions(&self, path: &Path, _owner: &str) -> Result<(), PlatformError> {
