@@ -59,26 +59,52 @@ async fn main() -> Result<(), StartupError> {
     Ok(())
 }
 
-/// Если `ADAPTERD_ENV_FILE` задан (macOS launchd путь — systemd делает это
-/// сам через `EnvironmentFile=`, launchd не умеет) — прочитать `.env` файл и
-/// проставить переменные в process env ДО чтения конфига. Без этого DSN/
-/// секреты не долетают до процесса на macOS, и adapterd падает на попытке
-/// подключения к БД.
+/// Читает простой `KEY=value` формат из файла, путь к которому задан в
+/// ADAPTERD_ENV_FILE. Поддерживает: пустые строки, строки-комментарии
+/// начинающиеся с `#`, обрезку whitespace вокруг key/value. НЕ поддерживает
+/// (осознанно, не нужно для формата, который install_flow.rs генерирует):
+/// кавычки вокруг значений, export-префиксы, multiline значения,
+/// интерполяцию переменных.
+///
+/// std::env::set_var НЕ переопределяет переменные, которые уже заданы в
+/// окружении процесса (например, если launchd/пользователь явно передал
+/// что-то через EnvironmentVariables в plist напрямую) — .env файл
+/// заполняет только то, что ещё не задано, не имеет приоритета над
+/// явным окружением.
 fn load_env_file_if_requested() {
     let Ok(env_file_path) = std::env::var("ADAPTERD_ENV_FILE") else {
-        return;
+        return; // не задано — обычный путь на Linux/Windows, ничего не делаем
     };
-    let Ok(contents) = std::fs::read_to_string(&env_file_path) else {
-        tracing::warn!(path = %env_file_path, "ADAPTERD_ENV_FILE set but file unreadable");
-        return;
+
+    let contents = match std::fs::read_to_string(&env_file_path) {
+        Ok(contents) => contents,
+        Err(e) => {
+            // tracing ещё не инициализирован в этой точке — используем
+            // eprintln! напрямую, не tracing::warn!. Это единственное
+            // место в main(), где это оправдано именно из-за порядка
+            // инициализации (см. комментарий выше про RUST_LOG timing).
+            eprintln!(
+                "[adapterd] warning: ADAPTERD_ENV_FILE={env_file_path} set but unreadable: {e}"
+            );
+            return;
+        }
     };
+
     for line in contents.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some((key, value)) = line.split_once('=') {
-            std::env::set_var(key.trim(), value.trim());
+        let Some((key, value)) = line.split_once('=') else {
+            eprintln!("[adapterd] warning: skipping malformed line in {env_file_path}: {line}");
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if std::env::var(key).is_err() {
+            // Только если ещё не задано — явное окружение процесса всегда
+            // приоритетнее содержимого .env файла.
+            std::env::set_var(key, value);
         }
     }
 }
@@ -381,4 +407,65 @@ fn build_auth_state(
             .map_err(|e| StartupError::Config(config::ConfigError::Validation(e.to_string())))?,
     );
     Ok(Some(protocol_a2a_server::AuthState { policy }))
+}
+
+#[cfg(test)]
+mod env_file_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn with_temp_env_file(content: &str, test_fn: impl FnOnce(&str)) {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let path = file.path().to_str().unwrap().to_string();
+        test_fn(&path);
+    }
+
+    #[test]
+    fn loads_simple_key_value_pairs() {
+        env::remove_var("TEST_ADAPTERD_ENV_VAR_1");
+        with_temp_env_file("TEST_ADAPTERD_ENV_VAR_1=hello\n", |path| {
+            env::set_var("ADAPTERD_ENV_FILE", path);
+            load_env_file_if_requested();
+            assert_eq!(env::var("TEST_ADAPTERD_ENV_VAR_1").unwrap(), "hello");
+            env::remove_var("TEST_ADAPTERD_ENV_VAR_1");
+            env::remove_var("ADAPTERD_ENV_FILE");
+        });
+    }
+
+    #[test]
+    fn skips_comments_and_blank_lines() {
+        env::remove_var("TEST_ADAPTERD_ENV_VAR_2");
+        with_temp_env_file("# a comment\n\nTEST_ADAPTERD_ENV_VAR_2=world\n", |path| {
+            env::set_var("ADAPTERD_ENV_FILE", path);
+            load_env_file_if_requested();
+            assert_eq!(env::var("TEST_ADAPTERD_ENV_VAR_2").unwrap(), "world");
+            env::remove_var("TEST_ADAPTERD_ENV_VAR_2");
+            env::remove_var("ADAPTERD_ENV_FILE");
+        });
+    }
+
+    #[test]
+    fn does_not_override_existing_process_env() {
+        env::set_var("TEST_ADAPTERD_ENV_VAR_3", "explicit-value");
+        with_temp_env_file("TEST_ADAPTERD_ENV_VAR_3=from-file\n", |path| {
+            env::set_var("ADAPTERD_ENV_FILE", path);
+            load_env_file_if_requested();
+            assert_eq!(
+                env::var("TEST_ADAPTERD_ENV_VAR_3").unwrap(),
+                "explicit-value",
+                "explicit process env must win over .env file content"
+            );
+            env::remove_var("TEST_ADAPTERD_ENV_VAR_3");
+            env::remove_var("ADAPTERD_ENV_FILE");
+        });
+    }
+
+    #[test]
+    fn no_op_when_adapterd_env_file_not_set() {
+        env::remove_var("ADAPTERD_ENV_FILE");
+        // Не должно паниковать или иметь побочные эффекты — критично для
+        // Linux/Windows путей, где эта переменная никогда не задаётся.
+        load_env_file_if_requested();
+    }
 }
