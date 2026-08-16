@@ -1,0 +1,22 @@
+[package]
+name = "driver-acp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adapter-core = { path = "../adapter-core" }
+adapter-model = { path = "../adapter-model" }
+async-trait.workspace = true
+dashmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "io-std", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
