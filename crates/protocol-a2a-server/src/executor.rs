@@ -14,7 +14,9 @@
 
 use a2a::*;
 use a2a_server::{AgentExecutor, ExecutorContext};
-use adapter_core::{AdapterCore, Caller, CallerId, CoreCommand, CoreError, InvokeRequest};
+use adapter_core::{
+    AdapterCore, BearerTokenPolicy, Caller, CallerId, CoreCommand, CoreError, InvokeRequest,
+};
 use adapter_model::{Part as AdapterPart, TaskId};
 use futures_util::{stream::BoxStream, StreamExt};
 use std::collections::HashMap;
@@ -24,7 +26,12 @@ use tokio::sync::broadcast;
 /// Executor, прокидывающий A2A вызовы в AdapterCore.
 pub struct AdapterAgentExecutor {
     core: Arc<AdapterCore>,
+    /// Fallback-caller, используемый когда auth не сконфигурирована или
+    /// запрос не прошёл через bearer-аутентификацию (dev/local profile).
     caller: Caller,
+    /// Необязательная bearer-policy: если задана, caller резолвится из
+    /// `Authorization` header каждого запроса, а не из статического `caller`.
+    auth: Option<Arc<BearerTokenPolicy>>,
 }
 
 impl AdapterAgentExecutor {
@@ -35,7 +42,46 @@ impl AdapterAgentExecutor {
                 id: CallerId(caller_id.into()),
                 scopes: Vec::new(),
             },
+            auth: None,
         }
+    }
+
+    /// Как `new()`, но с bearer-token auth: caller identity извлекается из
+    /// `Authorization` header запроса через `BearerTokenPolicy`.
+    pub fn with_auth(
+        core: Arc<AdapterCore>,
+        caller_id: impl Into<String>,
+        auth: Arc<BearerTokenPolicy>,
+    ) -> Self {
+        Self {
+            core,
+            caller: Caller {
+                id: CallerId(caller_id.into()),
+                scopes: Vec::new(),
+            },
+            auth: Some(auth),
+        }
+    }
+
+    /// Резолвит caller для конкретного запроса. Если auth сконфигурирована —
+    /// из `Authorization` header (через `ctx.service_params`, куда
+    /// `a2a-server` кладёт все HTTP headers). Невалидный/отсутствующий токен
+    /// — 401-подобная ошибка. Без auth — fallback на статического caller'а.
+    fn resolve_caller(&self, ctx: &ExecutorContext) -> Result<Caller, A2AError> {
+        let Some(policy) = &self.auth else {
+            return Ok(self.caller.clone());
+        };
+        let token = ctx
+            .service_params
+            .get("authorization")
+            .and_then(|values| values.first())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        let Some(token) = token else {
+            return Err(A2AError::invalid_request("missing bearer token"));
+        };
+        policy
+            .resolve(token)
+            .ok_or_else(|| A2AError::invalid_request("invalid bearer token"))
     }
 
     async fn create_and_subscribe(
@@ -63,9 +109,10 @@ impl AdapterAgentExecutor {
                 .unwrap_or(serde_json::Value::Null),
             deadline: None,
         };
+        let caller = self.resolve_caller(ctx)?;
         let result = self
             .core
-            .dispatch(self.caller.clone(), CoreCommand::Invoke(request))
+            .dispatch(caller, CoreCommand::Invoke(request))
             .await
             .map_err(core_error_to_a2a)?;
         let task_id = match result {
@@ -189,7 +236,12 @@ impl AgentExecutor for AdapterAgentExecutor {
             }
         };
         let core = self.core.clone();
-        let caller = self.caller.clone();
+        let caller = match self.resolve_caller(&ctx) {
+            Ok(caller) => caller,
+            Err(error) => {
+                return Box::pin(futures_util::stream::once(async move { Err(error) }));
+            }
+        };
         Box::pin(futures_util::stream::once(async move {
             let result = core
                 .dispatch(
@@ -211,6 +263,7 @@ impl Clone for AdapterAgentExecutor {
         Self {
             core: self.core.clone(),
             caller: self.caller.clone(),
+            auth: self.auth.clone(),
         }
     }
 }

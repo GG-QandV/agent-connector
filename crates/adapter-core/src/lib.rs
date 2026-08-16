@@ -16,6 +16,9 @@ use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod bearer_token;
+pub use bearer_token::{BearerTokenPolicy, BearerTokenPolicyError, TokenGrant};
+
 #[derive(Error, Debug)]
 pub enum CoreError {
     #[error("invalid request: {0}")]
@@ -162,12 +165,22 @@ pub struct TaskSubscription {
     pub history_end_seq: Option<EventSeq>,
 }
 
+/// По умолчанию каждый caller может держать одновременно столько же задач,
+/// сколько глобальный пул. Вызывается только для `with_caller_quota` /
+/// remote profile; локальный `new()` сохраняет прежнее поведение.
+const DEFAULT_CALLER_MAX_CONCURRENT: usize = 1;
+
 struct CoreInner {
     store: Arc<dyn TaskStore>,
     registry: Arc<AgentRegistry>,
     policy: Arc<dyn PolicyEngine>,
     global_permits: Arc<Semaphore>,
     active: DashMap<TaskId, ActiveTask>,
+    // Per-caller concurrency quota. Инициализируется лениво при первом
+    // invoke от конкретного caller. Значение по умолчанию — из CoreConfig,
+    // не из AgentLimits: caller quota не привязана к конкретному агенту.
+    per_caller_permits: DashMap<CallerId, Arc<Semaphore>>,
+    default_caller_max_concurrent: usize,
 }
 
 #[derive(Clone)]
@@ -182,6 +195,24 @@ impl AdapterCore {
         policy: Arc<dyn PolicyEngine>,
         max_concurrent: usize,
     ) -> Self {
+        Self::with_caller_quota(
+            store,
+            registry,
+            policy,
+            max_concurrent,
+            DEFAULT_CALLER_MAX_CONCURRENT,
+        )
+    }
+
+    /// Как `new()`, но с явным per-caller concurrency limit. Используйте это
+    /// в remote profile, где один caller не должен вытеснять остальных.
+    pub fn with_caller_quota(
+        store: Arc<dyn TaskStore>,
+        registry: Arc<AgentRegistry>,
+        policy: Arc<dyn PolicyEngine>,
+        max_concurrent: usize,
+        default_caller_max_concurrent: usize,
+    ) -> Self {
         Self {
             inner: Arc::new(CoreInner {
                 store,
@@ -189,8 +220,18 @@ impl AdapterCore {
                 policy,
                 global_permits: Arc::new(Semaphore::new(max_concurrent)),
                 active: DashMap::new(),
+                per_caller_permits: DashMap::new(),
+                default_caller_max_concurrent,
             }),
         }
+    }
+
+    fn caller_permits(&self, caller_id: &CallerId) -> Arc<Semaphore> {
+        self.inner
+            .per_caller_permits
+            .entry(caller_id.clone())
+            .or_insert_with(|| Arc::new(Semaphore::new(self.inner.default_caller_max_concurrent)))
+            .clone()
     }
 
     pub async fn dispatch(
@@ -216,21 +257,29 @@ impl AdapterCore {
         task_id: TaskId,
         after_seq: EventSeq,
     ) -> Result<TaskSubscription, CoreError> {
-        // Подписка на broadcast ПЕРВОЙ: между созданием receiver и чтением
-        // history не может быть потеряно ни одно событие (всё, что broadcast
-        // отправит после подписки, дойдёт до receiver; что отправил раньше —
-        // уже в store). Дубликаты (событие попалло и в history, и в receiver)
-        // потребитель отфильтрует по `history_end_seq`.
-        let receiver = self
-            .inner
-            .active
-            .get(&task_id)
-            .map(|entry| entry.tx.subscribe());
+        // Порядок операций (history ДО live subscribe) — намеренный и
+        // соответствует canonical design: "при reconnect transport должен
+        // запросить events_after из store, ЗАТЕМ подписаться на live events".
+        //
+        // Это НЕ race condition при условии, что TaskStore::events_after
+        // читает под READ COMMITTED-подобной semantics (обычный SQL SELECT на
+        // момент вызова), а не устаревший snapshot. transition() пишет в
+        // store и делает tx.send() последовательно в одной функции, store
+        // write первым — значит любое событие, отправленное между чтением
+        // history и открытием receiver, либо (а) уже видно в history благодаря
+        // записи в store ДО broadcast, либо (б) будет получено через receiver
+        // как дубликат. Потери не возникает — возможен только дубликат,
+        // который потребитель фильтрует по `history_end_seq`.
         let history = self
             .inner
             .store
             .events_after(task_id, after_seq, 500)
             .await?;
+        let receiver = self
+            .inner
+            .active
+            .get(&task_id)
+            .map(|entry| entry.tx.subscribe());
         let history_end_seq = history.last().map(|event| event.seq);
         Ok(TaskSubscription {
             history,
@@ -268,6 +317,7 @@ impl AdapterCore {
             .deadline
             .and_then(|duration| chrono::Duration::from_std(duration).ok())
             .map(|duration| chrono::Utc::now() + duration);
+        let caller_id = caller.id.clone();
         let initial = self
             .inner
             .store
@@ -275,7 +325,7 @@ impl AdapterCore {
                 task_id,
                 session_id: request.session_id,
                 agent_id: agent.id.clone(),
-                caller_id: caller.id,
+                caller_id,
                 idempotency_key: request.idempotency_key.clone(),
                 deadline_at,
             })
@@ -321,9 +371,32 @@ impl AdapterCore {
                 )));
             }
         };
+        // Per-caller quota между queue и global: первым делом задача не
+        // должна занимать глобальный слот, пока не пройдёт лимит своего
+        // caller'а. Acquire вне очереди (try_acquire) — как и глобальный
+        // лимит, typed reject вместо ожидания.
+        let caller_permit = match self.caller_permits(&caller.id).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                drop(queue);
+                self.fail_active(
+                    task_id,
+                    CoreError::ResourceExhausted(format!(
+                        "caller {} at concurrency limit",
+                        caller.id.0
+                    )),
+                )
+                .await?;
+                return Err(CoreError::ResourceExhausted(format!(
+                    "caller {} at concurrency limit",
+                    caller.id.0
+                )));
+            }
+        };
         let global = match self.inner.global_permits.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
+                drop(caller_permit);
                 drop(queue);
                 self.fail_active(
                     task_id,
@@ -338,6 +411,7 @@ impl AdapterCore {
         let per_agent = match agent.permits.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
+                drop(caller_permit);
                 drop(queue);
                 drop(global);
                 self.fail_active(
@@ -355,6 +429,7 @@ impl AdapterCore {
         let timeout = agent.limits.default_timeout;
         let core = self.clone();
         tokio::spawn(async move {
+            let _caller = caller_permit;
             let _global = global;
             let _agent = per_agent;
             // Timeout отменяет driver: если default_timeout истёк, вызываем
@@ -621,4 +696,132 @@ fn closed_receiver() -> broadcast::Receiver<CoreEvent> {
     let (tx, rx) = broadcast::channel(1);
     drop(tx);
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adapter_model::{AgentLimits, InvokeRequest};
+    use memory_task_store::MemoryTaskStore;
+    use std::time::Duration;
+
+    /// Driver, блокирующий invoke: задача "зависает" до завершения теста,
+    /// чтобы второй invoke того же caller гарантированно упёрся в quota.
+    struct BlockingDriver {
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait]
+    impl AgentDriver for BlockingDriver {
+        fn id(&self) -> &str {
+            "blocking"
+        }
+        fn capabilities(&self) -> DriverCapabilities {
+            DriverCapabilities {
+                cancellation: true,
+                provide_input: true,
+            }
+        }
+        async fn health(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+        async fn invoke(
+            &self,
+            _task_id: TaskId,
+            _request: InvokeRequest,
+        ) -> Result<mpsc::Receiver<DriverEvent>, CoreError> {
+            let (tx, rx) = mpsc::channel(8);
+            let release = self.release.clone();
+            tokio::spawn(async move {
+                release.notified().await;
+                let _ = tx.send(DriverEvent::Completed(Vec::new())).await;
+            });
+            Ok(rx)
+        }
+        async fn cancel(&self, _task_id: TaskId) -> Result<(), CoreError> {
+            Ok(())
+        }
+        async fn provide_input(
+            &self,
+            _task_id: TaskId,
+            _input: Vec<Part>,
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    fn test_core(default_caller_max_concurrent: usize) -> Arc<AdapterCore> {
+        let store: Arc<dyn TaskStore> = Arc::new(MemoryTaskStore::new());
+        let registry = Arc::new(AgentRegistry::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        registry.register(RegisteredAgent::new(
+            AgentId("blocking".into()),
+            vec!["skill".into()],
+            Arc::new(BlockingDriver { release }),
+            AgentLimits {
+                max_concurrent_tasks: 16,
+                max_queued_tasks: 64,
+                max_input_bytes: 1024 * 1024,
+                max_event_bytes: 256 * 1024,
+                default_timeout: Duration::from_secs(30),
+            },
+        ));
+        Arc::new(AdapterCore::with_caller_quota(
+            store,
+            registry,
+            Arc::new(AllowAllPolicy),
+            16,
+            default_caller_max_concurrent,
+        ))
+    }
+
+    async fn invoke_async(
+        core: &AdapterCore,
+        caller: &str,
+        key: &str,
+    ) -> Result<DispatchResult, CoreError> {
+        core.dispatch(
+            Caller {
+                id: CallerId(caller.into()),
+                scopes: Vec::new(),
+            },
+            CoreCommand::Invoke(InvokeRequest {
+                task_id: None,
+                agent_id: None,
+                skill_id: None,
+                idempotency_key: key.into(),
+                session_id: None,
+                input: Vec::new(),
+                context: serde_json::Value::Null,
+                deadline: None,
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn caller_quota_rejects_second_concurrent_task_from_same_caller() {
+        let core = test_core(1);
+        // Первый invoke создаёт задачу и удерживает единственный permit
+        // caller'а (driver ждёт release — задача жива до конца теста).
+        assert!(invoke_async(&core, "caller-a", "k1").await.is_ok());
+        // Второй invoke того же caller — quota exhausted.
+        let err = invoke_async(&core, "caller-a", "k2")
+            .await
+            .expect_err("expected quota rejection");
+        assert!(matches!(err, CoreError::ResourceExhausted(_)));
+        // Другой caller не затронут.
+        assert!(invoke_async(&core, "caller-b", "k3").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn caller_quota_is_per_caller_not_global() {
+        let core = test_core(2);
+        assert!(invoke_async(&core, "caller-a", "k1").await.is_ok());
+        assert!(invoke_async(&core, "caller-a", "k2").await.is_ok());
+        // Третий упёрся в quota=2.
+        let err = invoke_async(&core, "caller-a", "k3")
+            .await
+            .expect_err("expected quota rejection");
+        assert!(matches!(err, CoreError::ResourceExhausted(_)));
+    }
 }

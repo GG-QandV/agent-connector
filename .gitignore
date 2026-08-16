@@ -8,3 +8,4 @@
 *.db-shm
 coverage/
 .DS_Store
+/docs/design/archive/

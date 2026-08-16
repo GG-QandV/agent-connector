@@ -19,6 +19,15 @@ runtime:
   cleanup_interval_seconds: 3600
   shutdown_grace_seconds: 30
 
+# Bearer-token аутентификация JSON-RPC inbound.
+# Пусто (по умолчанию) = auth отключена (AllowAllPolicy).
+# Секрет — только имя env-переменной, значение никогда не кладётся в конфиг.
+auth:
+  bearer_tokens:
+    - token_env: ADAPTER_BEARER_TOKEN
+      caller_id: primary-client
+      allowed_scopes: []
+
 retention:
   task_ttl_days: 7
   event_ttl_days: 7

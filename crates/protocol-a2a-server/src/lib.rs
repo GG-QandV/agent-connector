@@ -27,11 +27,13 @@
 //! writer (task execution) никогда не блокируется на медленном SSE-клиенте,
 //! и другие tasks не страдают. Unbounded канал не используется.
 
+pub mod auth;
 pub mod card;
 pub mod executor;
 pub mod health;
 pub mod task_store;
 
+pub use auth::{require_bearer_auth, AuthState};
 pub use card::{AdapterCardConfig, AdapterCardProducer};
 pub use executor::AdapterAgentExecutor;
 pub use health::{health_router, HealthState};
@@ -41,17 +43,29 @@ use a2a_server::{agent_card::agent_card_router, jsonrpc::jsonrpc_router};
 use std::sync::Arc;
 
 /// Собрать единый axum::Router: agent card + JSON-RPC + health/readiness.
+///
+/// Если передан `Some(auth)` — JSON-RPC route защищается bearer-аутентификацией
+/// (middleware `require_bearer_auth`). agent_card и health остаются публичными
+/// по design.
 pub fn build_router(
     executor: Arc<AdapterAgentExecutor>,
     task_store: Arc<AdapterTaskStore>,
     card_producer: Arc<AdapterCardProducer>,
     health: HealthState,
+    auth: Option<AuthState>,
 ) -> axum::Router {
     let handler = Arc::new(a2a_server::DefaultRequestHandler::new(
         (*executor).clone(),
         (*task_store).clone(),
     ));
+    let mut jsonrpc = jsonrpc_router(handler);
+    if let Some(auth) = auth {
+        jsonrpc = jsonrpc.layer(axum::middleware::from_fn_with_state(
+            auth,
+            require_bearer_auth,
+        ));
+    }
     agent_card_router(card_producer)
-        .merge(jsonrpc_router(handler))
+        .merge(jsonrpc)
         .merge(health_router(health))
 }

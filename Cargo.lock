@@ -67,6 +67,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "memory-task-store",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-util",

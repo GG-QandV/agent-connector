@@ -30,6 +30,26 @@ pub struct Config {
     pub agents: Vec<AgentConfig>,
     #[serde(default)]
     pub retention: RetentionConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
+}
+
+/// Bearer-token аутентификация JSON-RPC inbound.
+/// Пусто (по умолчанию) = auth отключена, используется `AllowAllPolicy`.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub bearer_tokens: Vec<BearerTokenEntry>,
+}
+
+/// Одна запись доступа: имя env-переменной с токеном -> caller identity.
+/// Секрет в конфиг не кладётся — только имя env-переменной.
+#[derive(Clone, Debug, Deserialize)]
+pub struct BearerTokenEntry {
+    pub token_env: String,
+    pub caller_id: String,
+    #[serde(default)]
+    pub allowed_scopes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

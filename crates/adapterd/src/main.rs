@@ -8,9 +8,12 @@ use std::{env, path::Path, sync::Arc, time::Duration};
 
 mod config;
 
-use adapter_core::{AdapterCore, AgentDriver, AgentRegistry, AllowAllPolicy, RegisteredAgent};
+use adapter_core::{
+    AdapterCore, AgentDriver, AgentRegistry, AllowAllPolicy, BearerTokenPolicy, RegisteredAgent,
+    TokenGrant,
+};
 use adapter_store_contract::TaskStore;
-use config::{AgentTransportConfig, Config, StorageConfig};
+use config::{AgentTransportConfig, AuthConfig, Config, StorageConfig};
 use driver_http_sse::{Credential, HttpSseDriver, HttpSseDriverConfig};
 use driver_stdio::{StdioDriver, StdioDriverConfig};
 use memory_task_store::MemoryTaskStore;
@@ -55,6 +58,7 @@ struct Daemon {
     core: Arc<AdapterCore>,
     store: Arc<dyn TaskStore>,
     registry: Arc<AgentRegistry>,
+    auth_state: Option<protocol_a2a_server::AuthState>,
     cleanup_task: JoinHandle<()>,
     draining: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -72,10 +76,14 @@ impl Daemon {
                 config.agent_limits(agent),
             ));
         }
+        let auth_state = build_auth_state(&config.auth)?;
         let core = Arc::new(AdapterCore::new(
             store.clone(),
             registry.clone(),
-            Arc::new(AllowAllPolicy), // replace with PolicyEngine in remote profile
+            match &auth_state {
+                Some(state) => state.policy.clone() as Arc<dyn adapter_core::PolicyEngine>,
+                None => Arc::new(AllowAllPolicy),
+            },
             config.runtime.max_concurrent_tasks,
         ));
         let retention = config.retention_policy();
@@ -101,6 +109,7 @@ impl Daemon {
             core,
             store,
             registry,
+            auth_state,
             cleanup_task,
             draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -117,10 +126,15 @@ impl Daemon {
         };
         tracing::info!(mode=?self.config.mode, agents=self.config.agents.len(), addr=%addr, "adapterd started");
 
-        let executor = Arc::new(protocol_a2a_server::AdapterAgentExecutor::new(
-            self.core.clone(),
-            "a2a-client",
-        ));
+        let auth_state = self.auth_state;
+        let executor = Arc::new(match &auth_state {
+            Some(state) => protocol_a2a_server::AdapterAgentExecutor::with_auth(
+                self.core.clone(),
+                "a2a-client",
+                state.policy.clone(),
+            ),
+            None => protocol_a2a_server::AdapterAgentExecutor::new(self.core.clone(), "a2a-client"),
+        });
         let task_store = Arc::new(protocol_a2a_server::AdapterTaskStore::new(
             self.store.clone(),
         ));
@@ -138,7 +152,7 @@ impl Daemon {
             self.registry.clone(),
             self.draining.clone(),
         );
-        let app = protocol_a2a_server::build_router(executor, task_store, card, health);
+        let app = protocol_a2a_server::build_router(executor, task_store, card, health, auth_state);
 
         let server = tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, app).await {
@@ -226,4 +240,31 @@ fn ensure_parent_dir(path: &Path) -> Result<(), StartupError> {
         std::fs::create_dir_all(parent).map_err(|e| StartupError::Storage(e.to_string()))?;
     }
     Ok(())
+}
+
+/// AuthState для Axum middleware, если bearer-аутентификация включена.
+fn build_auth_state(
+    auth: &AuthConfig,
+) -> Result<Option<protocol_a2a_server::AuthState>, StartupError> {
+    if auth.bearer_tokens.is_empty() {
+        return Ok(None);
+    }
+    let entries = auth
+        .bearer_tokens
+        .iter()
+        .map(|entry| {
+            (
+                entry.token_env.clone(),
+                TokenGrant {
+                    caller_id: adapter_core::CallerId(entry.caller_id.clone()),
+                    allowed_scopes: entry.allowed_scopes.clone(),
+                },
+            )
+        })
+        .collect();
+    let policy = Arc::new(
+        BearerTokenPolicy::from_env(entries)
+            .map_err(|e| StartupError::Config(config::ConfigError::Validation(e.to_string())))?,
+    );
+    Ok(Some(protocol_a2a_server::AuthState { policy }))
 }
