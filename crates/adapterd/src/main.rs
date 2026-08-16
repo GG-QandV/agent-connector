@@ -38,10 +38,14 @@ enum StartupError {
 
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
+    let config_path = env::args()
+        .nth(1)
+        .unwrap_or_else(|| "./adapter.yaml".into());
+
     // Чтение .env ДО инициализации tracing: RUST_LOG сам может быть задан
     // через .env файл (не только в launchd EnvironmentVariables) — если
     // читать .env после init, try_from_default_env() уже прошёл.
-    load_env_file_if_requested();
+    load_env_files(&config_path);
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -50,42 +54,57 @@ async fn main() -> Result<(), StartupError> {
         )
         .init();
 
-    let config_path = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "./adapter.yaml".into());
     let config = Config::load(config_path)?;
     let daemon = Daemon::build(config).await?;
     daemon.run().await;
     Ok(())
 }
 
-/// Читает простой `KEY=value` формат из файла, путь к которому задан в
-/// ADAPTERD_ENV_FILE. Поддерживает: пустые строки, строки-комментарии
-/// начинающиеся с `#`, обрезку whitespace вокруг key/value. НЕ поддерживает
-/// (осознанно, не нужно для формата, который install_flow.rs генерирует):
-/// кавычки вокруг значений, export-префиксы, multiline значения,
-/// интерполяцию переменных.
+/// Определяет и читает `.env` файл для процесса. Два источника, в порядке
+/// приоритета:
+///
+/// 1. Явный `ADAPTERD_ENV_FILE` (путь от launchd на macOS — plist передаёт
+///    его через EnvironmentVariables, т.к. launchd не умеет EnvironmentFile=).
+/// 2. Файл `.env` рядом с конфигом (ручной запуск `./adapterd adapter.yaml`
+///    на Linux/Windows без systemd — там .env применяет systemd сам через
+///    EnvironmentFile=-..., а при ручном запуске этого не происходит).
+///
+/// В обоих случаях читается простой `KEY=value` формат. Поддерживает:
+/// пустые строки, строки-комментарии начинающиеся с `#`, обрезку whitespace
+/// вокруг key/value. НЕ поддерживает (осознанно, не нужно для формата,
+/// который install_flow.rs генерирует): кавычки вокруг значений,
+/// export-префиксы, multiline значения, интерполяцию переменных.
 ///
 /// std::env::set_var НЕ переопределяет переменные, которые уже заданы в
-/// окружении процесса (например, если launchd/пользователь явно передал
-/// что-то через EnvironmentVariables в plist напрямую) — .env файл
-/// заполняет только то, что ещё не задано, не имеет приоритета над
-/// явным окружением.
-fn load_env_file_if_requested() {
-    let Ok(env_file_path) = std::env::var("ADAPTERD_ENV_FILE") else {
-        return; // не задано — обычный путь на Linux/Windows, ничего не делаем
-    };
+/// окружении процесса — .env файл заполняет только то, что ещё не задано,
+/// не имеет приоритета над явным окружением.
+fn load_env_files(config_path: &str) {
+    if let Ok(explicit) = std::env::var("ADAPTERD_ENV_FILE") {
+        load_env_file(&explicit);
+        return;
+    }
 
-    let contents = match std::fs::read_to_string(&env_file_path) {
+    // Ручной запуск: .env рядом с конфигом, если существует.
+    let config = std::path::Path::new(config_path);
+    if let Some(dir) = config.parent() {
+        let candidate = dir.join(".env");
+        if candidate.is_file() {
+            if let Some(path) = candidate.to_str() {
+                load_env_file(path);
+            }
+        }
+    }
+}
+
+fn load_env_file(env_file_path: &str) {
+    let contents = match std::fs::read_to_string(env_file_path) {
         Ok(contents) => contents,
         Err(e) => {
             // tracing ещё не инициализирован в этой точке — используем
             // eprintln! напрямую, не tracing::warn!. Это единственное
             // место в main(), где это оправдано именно из-за порядка
             // инициализации (см. комментарий выше про RUST_LOG timing).
-            eprintln!(
-                "[adapterd] warning: ADAPTERD_ENV_FILE={env_file_path} set but unreadable: {e}"
-            );
+            eprintln!("[adapterd] warning: {env_file_path} set but unreadable: {e}");
             return;
         }
     };
@@ -425,11 +444,9 @@ mod env_file_tests {
     fn loads_simple_key_value_pairs() {
         env::remove_var("TEST_ADAPTERD_ENV_VAR_1");
         with_temp_env_file("TEST_ADAPTERD_ENV_VAR_1=hello\n", |path| {
-            env::set_var("ADAPTERD_ENV_FILE", path);
-            load_env_file_if_requested();
+            load_env_file(path);
             assert_eq!(env::var("TEST_ADAPTERD_ENV_VAR_1").unwrap(), "hello");
             env::remove_var("TEST_ADAPTERD_ENV_VAR_1");
-            env::remove_var("ADAPTERD_ENV_FILE");
         });
     }
 
@@ -437,11 +454,9 @@ mod env_file_tests {
     fn skips_comments_and_blank_lines() {
         env::remove_var("TEST_ADAPTERD_ENV_VAR_2");
         with_temp_env_file("# a comment\n\nTEST_ADAPTERD_ENV_VAR_2=world\n", |path| {
-            env::set_var("ADAPTERD_ENV_FILE", path);
-            load_env_file_if_requested();
+            load_env_file(path);
             assert_eq!(env::var("TEST_ADAPTERD_ENV_VAR_2").unwrap(), "world");
             env::remove_var("TEST_ADAPTERD_ENV_VAR_2");
-            env::remove_var("ADAPTERD_ENV_FILE");
         });
     }
 
@@ -449,23 +464,74 @@ mod env_file_tests {
     fn does_not_override_existing_process_env() {
         env::set_var("TEST_ADAPTERD_ENV_VAR_3", "explicit-value");
         with_temp_env_file("TEST_ADAPTERD_ENV_VAR_3=from-file\n", |path| {
-            env::set_var("ADAPTERD_ENV_FILE", path);
-            load_env_file_if_requested();
+            load_env_file(path);
             assert_eq!(
                 env::var("TEST_ADAPTERD_ENV_VAR_3").unwrap(),
                 "explicit-value",
                 "explicit process env must win over .env file content"
             );
             env::remove_var("TEST_ADAPTERD_ENV_VAR_3");
+        });
+    }
+
+    #[test]
+    fn explicit_adapterd_env_file_wins_over_config_sibling() {
+        // Оба источника задают одну переменную с разными значениями —
+        // явный ADAPTERD_ENV_FILE должен иметь приоритет.
+        env::remove_var("TEST_ADAPTERD_ENV_VAR_4");
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().to_str().unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "TEST_ADAPTERD_ENV_VAR_4=from-sibling\n",
+        )
+        .unwrap();
+
+        with_temp_env_file("TEST_ADAPTERD_ENV_VAR_4=from-explicit\n", |explicit| {
+            env::set_var("ADAPTERD_ENV_FILE", explicit);
+            let config_path = format!("{config_dir}/adapter.yaml");
+            load_env_files(&config_path);
+            assert_eq!(
+                env::var("TEST_ADAPTERD_ENV_VAR_4").unwrap(),
+                "from-explicit",
+                "explicit ADAPTERD_ENV_FILE must take precedence over config-sibling .env"
+            );
+            env::remove_var("TEST_ADAPTERD_ENV_VAR_4");
             env::remove_var("ADAPTERD_ENV_FILE");
         });
     }
 
     #[test]
-    fn no_op_when_adapterd_env_file_not_set() {
+    fn config_sibling_env_loaded_for_manual_run() {
+        // Ручной запуск ./adapterd path/to/adapter.yaml без ADAPTERD_ENV_FILE:
+        // .env рядом с конфигом должен подхватиться.
+        env::remove_var("TEST_ADAPTERD_ENV_VAR_5");
         env::remove_var("ADAPTERD_ENV_FILE");
-        // Не должно паниковать или иметь побочные эффекты — критично для
-        // Linux/Windows путей, где эта переменная никогда не задаётся.
-        load_env_file_if_requested();
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().to_str().unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "TEST_ADAPTERD_ENV_VAR_5=from-sibling\n",
+        )
+        .unwrap();
+
+        let config_path = format!("{config_dir}/adapter.yaml");
+        load_env_files(&config_path);
+        assert_eq!(
+            env::var("TEST_ADAPTERD_ENV_VAR_5").unwrap(),
+            "from-sibling",
+            "config-sibling .env must be loaded on manual run"
+        );
+        env::remove_var("TEST_ADAPTERD_ENV_VAR_5");
+    }
+
+    #[test]
+    fn no_op_when_neither_env_source_present() {
+        env::remove_var("ADAPTERD_ENV_FILE");
+        // Пустой dir без .env и без явного файла — не должно паниковать
+        // или иметь побочные эффекты (обычный Linux/Windows путь).
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("adapter.yaml");
+        load_env_files(config_path.to_str().unwrap());
     }
 }
