@@ -60,6 +60,21 @@ Adapterd стартует, создаёт `./data/adapter.db`, поднимае�
 spawn'нутой задачи, снаружи передаётся только `CancellationToken`, чтобы
 избежать moved-value конфликта между `await_response(self)` и `cancel(self, ..)`.
 
+## Installer: adapterctl
+
+`crates/adapterctl` — installer / service manager (Linux systemd, macOS
+launchd, Windows sc.exe):
+
+```bash
+sudo adapterctl install --storage sqlite --start     # установить как службу
+sudo adapterctl restart                               # перезапустить
+sudo adapterctl uninstall --purge-data                # удалить вместе с данными
+```
+
+Установка с managed Docker Postgres требует `--confirm-docker`; секреты
+(DSN, bearer-токены) пишутся только в `.env` рядом с конфигом — никогда в
+`adapter.yaml`. Подробности: `docs/user-guide.md`.
+
 ## Design documents
 
 Исходные спеки и архитектура перенесены в `docs/design/`:
@@ -72,6 +87,7 @@ spawn'нутой задачи, снаружи передаётся только 
 
 Краткая вводная: `docs/architecture.md`. Эксплуатация: `docs/operations.md`.
 Совместимость протоколов: `docs/protocol-compatibility.md`.
+Пользователь: `docs/user-guide.md`. Контрибуторам: `docs/contributing.md`.
 
 ## Status
 
@@ -81,9 +97,11 @@ spawn'нутой задачи, снаружи передаётся только 
 `cargo test --workspace` проходят.
 
 Реализовано: A2A server (`protocol-a2a-server`), ACP runtime
-(`protocol-acp-runtime`), MCP driver (`driver-mcp`, rmcp 0.8.5, с progress
-и cancellation через `CancellationToken`).
+(`protocol-acp-runtime`), MCP driver (`driver-mcp`, rmcp 0.8.5, stdio + HTTP
+транспорты, progress/cancel через `CancellationToken`, input-schema
+валидация, проверка версии протокола), installer (`adapterctl`) с
+launchd/sc.exe/systemd-слоями и graceful shutdown.
 
-Следующие задачи: миграции Postgres, расширенные integration-тесты для
-`driver-mcp` против реального MCP stdio-сервера, HTTP-транспорт для MCP
-(сейчас поддержан только stdio child-process).
+Известные ограничения MCP: hot-update skills при `tools/list_changed`
+(нужен restart), multi-turn `input_required` (feature-gate), prompts/resources
+не маппятся — см. `docs/design/adr-0001-mcp-dynamic-capabilities.md`.
