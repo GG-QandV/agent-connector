@@ -106,7 +106,33 @@ Runtime может проверять (не создавать): доступе�
 
 ### Статус в текущем коде agent-connector
 
-**Не реализовано.** В прочитанном мной `crates/adapterd/src/main.rs`/`config.rs` нет `adapterctl` бинарника и нет installer-flow вообще. `StorageConfig::Postgres { dsn_env, schema, max_connections }` в `config.rs` **уже правильно** соответствует целевому runtime-контракту (читает DSN из env, не создаёт Docker-ресурсы) — это хорошо совпадает с каноном. Но сам `adapterctl install` как отдельный инструмент — открытая задача, ничего из CLI-флоу выше не начато.
+**Реализовано** (`crates/adapterctl`). CLI-флоу `adapterctl install` с вариантами
+storage (`sqlite` / `existing-postgres` / `managed-docker-postgres` /
+`external-managed`) работает:
+
+- `managed_docker.rs` — подъём изолированного Postgres-контейнера через
+  bollard (network/volume/container с ownership-лейблом
+  `io.agent-connector.managed=true`, `pg_isready` readiness, `--confirm-docker`,
+  graceful Ctrl+C при pull);
+- `install_flow.rs` — выбор storage → `SELECT 1` валидация → запись
+  `adapter.yaml` + `.env` (секрет только в `.env`, в конфиге — имя
+  переменной) → копирование бинаря → регистрация службы;
+- `postgres_lifecycle.rs` — `backup-postgres` (atomic `.tmp`+rename) и
+  `upgrade-postgres` (обязательный backup перед сменой образа);
+- `platform/{linux,macos,windows}.rs` — systemd unit / launchd plist /
+  sc.exe, с `start`/`stop`/`restart`/`uninstall` (`stop` останавливает,
+  не удаляет службу);
+- `config_template.rs` — валидация агентов через реальные типы
+  `adapterd::config`.
+
+`StorageConfig::Postgres { dsn_env, schema, max_connections }` в `config.rs`
+читает DSN из env — соответствует целевому runtime-контракту, daemon не
+трогает Docker.
+
+Из canonical CLI-флоу не реализовано: установка самого Docker Engine/Compose
+(installer требует уже установленный Docker, не ставит его сам) и запуск
+migrations (обязанность пользователя/верхнего уровня; runtime имеет
+healthcheck-путь).
 
 ## 2. Канон архитектуры adapter-core (полная спецификация от автора)
 
@@ -204,7 +230,7 @@ pub struct CoreEvent {
 
 ### Расхождение с текущим кодом: `Resume` как явная команда
 
-Канон определяет `CoreCommand::Resume { task_id, after_seq }` как first-class команду. В прочитанном мной `adapter-core/src/lib.rs` есть только `AdapterCore::subscribe(task_id, after_seq)` как отдельный публичный метод — не вариант `CoreCommand`. Функционально близко, но не идентично: canonical-модель предполагает, что resume идёт через тот же `dispatch()`-путь, что и остальные команды (с policy-check и unified error handling), а текущий код обходит `dispatch()` для subscribe. Это стоит явно сверить и решить: либо привести `subscribe` под `CoreCommand::Resume`, либо явно задокументировать, почему subscribe — отдельный путь (вероятная причина: subscribe не мутирует state, значит не нуждается в той же authorize-цепочке — но тогда `PolicyEngine::authorize` не защищает read-путь, что тоже нужно явно решить, особенно ввиду открытого пробела с аутентификацией).
+Канон определяет `CoreCommand::Resume { task_id, after_seq }` как first-class команду. В текущем `adapter-core/src/lib.rs` есть только `AdapterCore::subscribe(task_id, after_seq)` как отдельный публичный метод — не вариант `CoreCommand`. Это осознанное решение: `subscribe` не мутирует state (только читает history + подписывается на live), поэтому не проходит через `dispatch()`/`authorize`-цепочку — read-path намеренно исключён из неё. Зафиксировано как известное расхождение.
 
 ### Жизненный цикл задачи — таблица переходов (canonical)
 
@@ -246,17 +272,15 @@ pub struct CoreEvent {
 
 **Сверка**: пункт 3 подтверждён — `AdapterCore::transition()` делает `append_event_and_transition` (store) и `tx.send()` (broadcast) как единый шаг, это совпадает с каноном. Пункт 6 — **не проверено**: не видел код `Artifact`-обработки достаточно детально, чтобы подтвердить лимиты размера.
 
-### Event fan-out и известный race — теперь с полным контекстом канона
+### Event fan-out и известный race — разрешено canonical-совместимым способом
 
 Canonical явно предупреждает:
 
 > `broadcast` не является durable delivery: подписчик может отстать и получить lag. При reconnect transport должен запросить `events_after(task_id, last_seq)` из store, затем подписаться на live events.
 
-Это **буквально описывает источник** того race-condition бага, который я нашёл в `AdapterCore::subscribe` (чтение history → потом подписка, теряет событие в窗). Канон говорит "запросить history, **потом** подписаться" — то есть порядок в каноне **совпадает** с порядком в текущем багованном коде (history-first), а не с моим предложенным фиксом (subscribe-first)!
+Это **буквально описывает источник** того race-condition бага, который был найден в `AdapterCore::subscribe` (чтение history → потом подписка, теряет событие в окне). Канон говорит "запросить history, **потом** подписаться" — то есть порядок в каноне **совпадает** с порядком в коде (history-first).
 
-Это меняет диагноз: я должен явно пересмотреть свой фикс. Если canonical порядок — history-first, то защита от потери событий должна быть другой: не переставлять порядок операций, а либо (а) делать `events_after` и `tx.subscribe()` в одной атомарной операции относительно `active` map (например, под одним `DashMap`-guard, не через два отдельных `.get()` вызова), либо (б) принять, что broadcast lag — ожидаемый canonical trade-off, и полагаться на `RecvError::Lagged` → explicit resume-signal (что текущий код **уже делает** в `executor.rs`) как основной механизм защиты, а не пытаться устранить окно гонки полностью на уровне `subscribe()`.
-
-**Это меняет приоритет моего предыдущего фикса.** Мой `lib_fix_subscribe_race.rs` может быть избыточным или даже неверным относительно canonical design intent — нужно явно решить, какая стратегия принята: "no gap" (мой fix) vs "explicit lag detection + resume" (canonical + текущий код в `executor.rs`). Рекомендую: если canonical документ — source of truth, то правильный fix — не переставлять порядок в `subscribe()`, а сделать чтение history и подписку атомарными относительно вставки в `active` DashMap (например, через短-lived lock/guard на конкретной записи), либо просто задокументировать lag как expected behavior, покрытый `Lagged` handling.
+**Итоговое решение (в коде, `subscribe()`):** история читается первой, затем открывается live-receiver. Потери не возникает: `transition()` пишет в store и делает `tx.send()` последовательно в одной функции, store-write первым — событие, отправленное между чтением history и подпиской, либо уже видно в history, либо придёт через receiver как дубликат. Потребитель фильтрует дубликаты по `history_end_seq`. Lag при переполнении broadcast обрабатывается в `executor.rs` через `RecvError::Lagged` → явный resume-сигнал. Ранее предложенный фикс (subscribe-first) **не применялся** — он противоречил бы canonical design intent.
 
 ### Connector abstraction (canonical, dословно как `AgentConnector`)
 
@@ -272,7 +296,9 @@ pub trait AgentConnector: Send + Sync {
 }
 ```
 
-**Сверка с кодом**: текущий `AgentDriver` trait (в `adapter-core/src/lib.rs`) имеет `id`, `capabilities`, `health`, `invoke`, `cancel`, `provide_input` — очень близко, но **нет метода `resume`** на уровне driver. Это соответствует тому, что resume в текущем коде реализован только на уровне `AdapterCore::subscribe` (читает store history), не требуя от driver повторной трансляции событий — архитектурно разумная разница, но стоит явно отметить, что имя `AgentConnector` (canonical) переименовано в `AgentDriver` (implementation) без объяснения в коде.
+**Сверка с кодом**: текущий `AgentDriver` trait (в `adapter-core/src/lib.rs`) имеет `id`, `capabilities`, `health`, `invoke`, `cancel`, `provide_input` — очень близко, но **нет метода `resume`** на уровне driver. Это соответствует тому, что resume в текущем коде реализован только на уровне `AdapterCore::subscribe` (читает store history), не требуя от driver повторной трансляции событий — архитектурно разумная разница. Имя `AgentConnector` (canonical) переименовано в `AgentDriver` (implementation); терминологический ребрендинг crates остаётся отложенным решением.
+
+Дополнительно в `driver-mcp` реализована hot-update capabilities: `on_tool_list_changed` (типизированный метод rmcp 0.8.5) → mpsc-сигнал → background-задача → re-discovery + `RegisteredAgent.update_skills()` (ADR-0001 Решение 1).
 
 ### Protocol adapters — единый `AdapterService`
 
@@ -289,11 +315,15 @@ pub trait AdapterService: Send + Sync {
 
 Canonical описывает `transport_policy` config с `prefer`/`allow_fallback`/`require_tls`, discovery через `GET /.well-known/agent-adapter.json`, безопасный fallback **только до `Accepted`** (после — только reconnect/resume, никогда новый invoke, иначе side effect может выполниться дважды). В прочитанном `config.rs` нет `transport_policy` секции и нет discovery manifest endpoint. Это подтверждённый roadmap gap, не баг.
 
-### Security — сверка с открытым пробелом аутентификации
+### Security — сверка с текущим состоянием
 
 Canonical для remote profile требует: TLS обязательно, mTLS как production recommendation adapter→agent, caller identity через OIDC/JWT/API token, credential provider abstraction, capability-based policy per caller, rate limit/concurrency quota per caller/tenant.
 
-**Это прямое подтверждение** ранее найденного критичного пробела: `PolicyEngine` в коде имеет только `AllowAllPolicy`, значит **ни одно** из этих canonical security-требований для remote profile сейчас не реализовано. Canonical явно ожидает, что это будет сделано — значит это не "возможно нужно", а "canonically required and currently missing".
+**Текущее состояние:**
+
+- **Bearer-token auth — реализовано.** `BearerTokenPolicy` (production-ready `PolicyEngine`) + `TokenGrant` (caller_id + allowed_scopes), `AuthConfig` в конфиге задаёт имена env-переменных с токенами. В `adapterd::main.rs` middleware `require_bearer_auth` защищает JSON-RPC; `agent_card` и `health` остаются публичными. `AllowAllPolicy` — default при пустой `auth:` секции (local profile).
+- **Per-caller concurrency quota — реализовано.** `CoreInner.per_caller_permits: DashMap<CallerId, Arc<Semaphore>>` через `AdapterCore::with_caller_quota(max_concurrent, default_caller_max_concurrent)`; `remote` profile использует его. Проверяется до global и per-agent лимитов.
+- **TLS**: HTTP/SSE endpoint агентов требует `https://` (кроме `allow_http_development`), MCP HTTP — то же. mTLS, OIDC/JWT — не реализовано (roadmap).
 
 ### Структура workspace — расхождение в именах crates
 
@@ -331,15 +361,17 @@ crates/
 ├── protocol-acp-runtime        # аналогично
 ├── driver-stdio                # canonical: connector-stdio
 ├── driver-http-sse             # canonical: connector-http-sse
+├── driver-mcp                  # MCP client driver (rmcp 0.8.5, stdio + HTTP)
 ├── memory-task-store           # canonical: adapter-storage-memory
 ├── sqlite-task-store-adapter   # canonical: adapter-storage-sqlite
 ├── postgres-task-store-adapter # canonical: adapter-storage-postgres
-└── adapterd
+├── adapterd                    # daemon binary; config.rs ре-экспортируется через lib.rs
+└── adapterctl                  # installer / service manager CLI
 ```
 
-Наименование `driver-*` вместо canonical `connector-*` и `*-task-store-adapter` вместо `adapter-storage-*` — то же самое "adapter vs connector" терминологическое расхождение, которое мы уже обсуждали раньше в разговоре про переименование репозитория. Canonical документ явно использует "connector" как имя абстракции — это подтверждает решение назвать репозиторий `agent-connector`, но код внутри до сих пор использует старую терминологию `driver`/`adapter-core`. Ребрендинг crates остаётся отложенным решением, как и было зафиксировано ранее.
+Наименование `driver-*` вместо canonical `connector-*` и `*-task-store-adapter` вместо `adapter-storage-*` — то же самое "adapter vs connector" терминологическое расхождение. Canonical документ явно использует "connector" как имя абстракции — это подтверждает решение назвать репозиторий `agent-connector`, но код внутри до сих пор использует старую терминологию `driver`/`adapter-core`. Ребрендинг crates остаётся отложенным решением, как и было зафиксировано ранее.
 
-Отсутствует в текущем коде: `connector-unix-socket`, `connector-websocket`, `connector-grpc`, `adapter-config` как отдельный crate (сейчас конфиг — часть `adapterd`, не отдельный crate) — все ожидаемые roadmap gaps по этапам 3-5.
+Отсутствует в текущем коде: `connector-unix-socket`, `connector-websocket`, `connector-grpc` — ожидаемые roadmap gaps по этапам 3-5. `adapter-config` как отдельный crate не выделен (конфиг — часть `adapterd`, ре-экспорт через `lib.rs` для `adapterctl`).
 
 ### Scheduler/backpressure — сверка
 
@@ -353,7 +385,7 @@ pub struct Scheduler {
 }
 ```
 
-**Расхождение**: текущий код имеет `global_permits: Semaphore` на уровне `CoreInner` и `permits`/`queue_permits: Semaphore` на уровне `RegisteredAgent` (per-agent) — это покрывает global и per-agent, но **нет per-caller quota** (`DashMap<CallerId, Arc<Semaphore>>`). Это значит один caller теоретически может забить весь global/per-agent лимит один, вытеснив остальных — ещё один открытый gap, ранее не пойманный в моём code review, потому что я не сверял с каноном.
+**Сверка**: текущий код имеет `global_permits: Semaphore` на уровне `CoreInner`, `permits`/`queue_permits: Semaphore` на уровне `RegisteredAgent` (per-agent) **и** `per_caller_permits: DashMap<CallerId, Arc<Semaphore>>` (per-caller quota через `with_caller_quota`). Все три уровня canonical `Scheduler` покрыты. Порядок проверки в `invoke()`: queue → per-caller → global → per-agent — один caller не может вытеснить остальных при `remote` profile (`with_caller_quota`).
 
 ### Observability — не проверено
 
@@ -361,33 +393,35 @@ Canonical требует `/healthz`/`/readyz` (реализовано, подт�
 
 ### План реализации по этапам (canonical roadmap) — маппинг на текущий статус
 
-| Этап                                | Canonical содержимое                                                                                         | Текущий статус в agent-connector                                                                                                              |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0 — contracts и тесты               | model, transition tests, fake connector, memory store                                                        | ✅ В основном есть (adapter-model, memory-task-store); transition tests как unit tests — не подтверждено покрытие                              |
-| 1 — local MVP                       | StdioConnector, in-memory registry, core invoke/cancel/status, ACP stdio adapter                             | ✅ driver-stdio, AgentRegistry, AdapterCore, protocol-acp-runtime — все есть                                                                   |
-| 2 — remote MVP                      | HttpSseConnector, A2A HTTP/SSE server, bearer auth, SQLite journal, resume by seq, idempotency               | ⚠️ Частично: driver-http-sse и protocol-a2a-server есть, SQLite есть, idempotency есть; **bearer auth — нет** (PolicyEngine = AllowAllPolicy) |
-| 3 — reliable single-node production | retry/reconnect policy, leases, resource quotas, artifact store interface, OTel/metrics, Unix socket sidecar | ❌ Не начато: no leases, no per-caller quota, no artifact store abstraction, no OTel, no connector-unix-socket                                 |
-| 4 — multi-instance                  | Postgres store, distributed leases, durable outbox, shared artifact store, mTLS/OIDC                         | ⚠️ Postgres store есть (не прогнан против живого PG), но без leases это не даёт реальной multi-instance safety                                |
-| 5 — new transports                  | WebSocket connector, gRPC connector, manifest discovery                                                      | ❌ Не начато                                                                                                                                   |
+| Этап                                | Canonical содержимое                                                                                         | Текущий статус в agent-connector                                                                                           |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| 0 — contracts и тесты               | model, transition tests, fake connector, memory store                                                        | ✅ Есть (adapter-model, memory-task-store); transition tests как unit tests — не подтверждено полное покрытие               |
+| 1 — local MVP                       | StdioConnector, in-memory registry, core invoke/cancel/status, ACP stdio adapter                             | ✅ driver-stdio, AgentRegistry, AdapterCore, protocol-acp-runtime — все есть                                                |
+| 2 — remote MVP                      | HttpSseConnector, A2A HTTP/SSE server, bearer auth, SQLite journal, resume by seq, idempotency               | ✅ Полностью: driver-http-sse, protocol-a2a-server, **bearer auth (BearerTokenPolicy)**, SQLite, idempotency, resume by seq |
+| 3 — reliable single-node production | retry/reconnect policy, leases, resource quotas, artifact store interface, OTel/metrics, Unix socket sidecar | ⚠️ Частично: **per-caller quota реализована**; нет leases, artifact store abstraction, OTel, connector-unix-socket         |
+| 4 — multi-instance                  | Postgres store, distributed leases, durable outbox, shared artifact store, mTLS/OIDC                         | ⚠️ Postgres store есть (не прогнан против живого PG), но без leases это не даёт реальной multi-instance safety             |
+| 5 — new transports                  | WebSocket connector, gRPC connector, manifest discovery                                                      | ❌ Не начато                                                                                                                |
 
 ### Критерии готовности MVP (canonical, дословно) — сверка
 
-1. Агент с `POST /tasks` + SSE events подключается только URL и token. — ⚠️ URL да, token — нет реального auth.
+1. Агент с `POST /tasks` + SSE events подключается только URL и token. — ✅ URL + bearer token (BearerTokenPolicy).
 2. A2A caller может discover adapter и выполнить задачу. — ✅ Agent card + JSON-RPC подтверждены.
 3. Повторный invoke с тем же idempotency key возвращает исходный task. — ✅ Подтверждено (`create_or_get_idempotent`).
-4. SSE reconnect с `last_seq` не теряет и не дублирует durable events. — ⚠️ Именно здесь живёт race-condition спор выше — нужно решить canonical-совместимый fix.
+4. SSE reconnect с `last_seq` не теряет и не дублирует durable events. — ✅ Решено canonical-совместимым способом: history-first + `history_end_seq` фильтр дубликатов + `Lagged` → resume.
 5. Cancel безопасен при повторе. — ✅ `cancel()` идемпотентен по коду (terminal state check в начале).
 6. Невозможные переходы состояния отклоняются. — ✅ `transition()` проверяет `allowed_states`.
-7. Одновременно выполняются независимые tasks, события одной task упорядочены. — ✅ Подтверждено семафорами + per-task broadcast channel.
+7. Одновременно выполняются независимые tasks, события одной task упорядочены. — ✅ Подтверждено семафорами (включая per-caller) + per-task broadcast channel.
 8. При падении SSE после `Accepted` задача не перезапускается автоматически. — ✅ Подтверждено комментарием в `executor.rs` ("disconnect не отменяет task").
 9. Prompt, token и artifact content не появляются в default logs. — ❓ Не проверено.
-10. Новый connector можно добавить как отдельный crate без изменения adapter-core. — ✅ Архитектурно верно (trait-based), не протестировано explicitly.
+10. Новый connector можно добавить как отдельный crate без изменения adapter-core. — ✅ Архитектурно верно (trait-based), driver-mcp добавлен без правки core.
 
-## 3. Итоговые действия, которые нужно предпринять с учётом канона
+## 3. Итоговые действия с учётом канона — актуальный статус
 
-1. **Пересмотреть фикс race-condition в `subscribe()`** — canonical порядок (history-first) противоречит моему предыдущему fix (subscribe-first). Нужно явное решение: атомарность через lock на `active`-записи, или явное принятие lag+resume как canonical-approved стратегии.
-2. **Добавить per-caller quota** в `Scheduler`/`CoreInner` — canonical явно требует `DashMap<CallerId, Arc<Semaphore>>`, текущий код это пропускает.
-3. **Спроектировать и начать `adapterctl install`** — installer/runtime разделение принято как обязательное правило, но полностью не начато.
-4. **Аутентификация remote profile** — теперь подтверждена каноном как required, не как "желательно". `AllowAllPolicy` — единственная реализация, это блокер этапа 2 canonical roadmap, не просто nice-to-have.
-5. **Явно решить терминологический ребрендинг** `driver-*`→`connector-*`, `*-task-store-adapter`→`adapter-storage-*`, или явно задокументировать причину сохранения текущих имён.
-6. **CoreCommand::Resume** — решить, приводить ли `subscribe()` под unified `dispatch()`-путь с policy-check, или явно документировать read-path как исключение из authorize-цепочки.
+1. **Race-condition в `subscribe()`** — ✅ **Решено.** Применён canonical-совместимый порядок (history-first) + фильтр дубликатов `history_end_seq` + `Lagged` → resume в `executor.rs`. Ранее предложенный fix (subscribe-first) отклонён как противоречащий канону.
+2. **Per-caller quota** — ✅ **Реализовано.** `per_caller_permits` через `AdapterCore::with_caller_quota`, используется в remote profile.
+3. **`adapterctl install`** — ✅ **Реализовано** (`crates/adapterctl`): storage-профили, managed Docker Postgres, service manager (systemd/launchd/sc.exe), backup/upgrade.
+4. **Аутентификация remote profile** — ✅ **Реализовано.** `BearerTokenPolicy` + `TokenGrant`, middleware в adapterd; `AllowAllPolicy` — только default для local.
+5. **Терминологический ребрендинг** `driver-*`→`connector-*` — ⏸ Отложено (осознанно, репозиторий уже `agent-connector`).
+6. **`CoreCommand::Resume`** — ⏸ Решено оставить `subscribe()` отдельным read-путём вне `dispatch()`/`authorize` (задокументировано в §2).
+7. **MCP hot-update skills** (`tools/list_changed`) — ✅ Реализовано (ADR-0001 Решение 1): `on_tool_list_changed` → `RegisteredAgent.update_skills()`.
+8. **MCP драйвер** — ✅ driver-mcp (stdio + HTTP, progress, cancel, input-schema валидация, проверка версии протокола).

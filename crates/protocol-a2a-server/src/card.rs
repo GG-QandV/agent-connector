@@ -31,7 +31,7 @@ impl AdapterCardProducer {
             .into_iter()
             .flat_map(|agent| {
                 let agent_id = agent.id.0.clone();
-                let skills = agent.skills.clone();
+                let skills = agent.skills();
                 skills.into_iter().map(move |skill| AgentSkill {
                     id: skill.clone(),
                     name: skill.clone(),

@@ -67,7 +67,12 @@ pub trait AgentDriver: Send + Sync {
 
 pub struct RegisteredAgent {
     pub id: AgentId,
-    pub skills: Vec<String>,
+    /// Список skills, доступных через этот агент. Хранится в `std::sync::RwLock`
+    /// (не tokio) намеренно: `AgentCardProducer::card()` — синхронный метод
+    /// чужого SDK trait, он должен читать skills без `.await`. `std::sync::RwLock`
+    /// даёт синхронный `read()`, запись — короткое присваивание нового Vec
+    /// (микросекунды), блокировки thread здесь приемлемы.
+    skills: std::sync::RwLock<Vec<String>>,
     pub driver: Arc<dyn AgentDriver>,
     pub limits: AgentLimits,
     permits: Arc<Semaphore>,
@@ -84,9 +89,33 @@ impl RegisteredAgent {
             permits: Arc::new(Semaphore::new(limits.max_concurrent_tasks)),
             queue_permits: Arc::new(Semaphore::new(limits.max_queued_tasks)),
             id,
-            skills,
+            skills: std::sync::RwLock::new(skills),
             driver,
             limits,
+        }
+    }
+
+    /// Снапшот текущего списка skills (клонирование под коротким read-lock).
+    pub fn skills(&self) -> Vec<String> {
+        self.skills
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    /// Проверка одного skill без клонирования всего Vec — hot path resolve().
+    pub fn has_skill(&self, skill: &str) -> bool {
+        self.skills
+            .read()
+            .map(|guard| guard.iter().any(|candidate| candidate == skill))
+            .unwrap_or(false)
+    }
+
+    /// Точка входа для hot-update: вызывается driver-mcp при получении
+    /// notifications/tools/list_changed.
+    pub fn update_skills(&self, new_skills: Vec<String>) {
+        if let Ok(mut guard) = self.skills.write() {
+            *guard = new_skills;
         }
     }
 }
@@ -123,7 +152,7 @@ impl AgentRegistry {
             return self
                 .agents
                 .iter()
-                .find(|entry| entry.skills.iter().any(|candidate| candidate == skill))
+                .find(|entry| entry.value().has_skill(skill))
                 .map(|entry| entry.value().clone())
                 .ok_or(CoreError::NoEligibleAgent);
         }
@@ -823,5 +852,86 @@ mod tests {
             .await
             .expect_err("expected quota rejection");
         assert!(matches!(err, CoreError::ResourceExhausted(_)));
+    }
+
+    #[test]
+    fn update_skills_reflects_in_snapshot_and_has_skill() {
+        let agent = RegisteredAgent::new(
+            AgentId("hot-update".into()),
+            vec!["old-skill".into()],
+            Arc::new(BlockingDriver {
+                release: Arc::new(tokio::sync::Notify::new()),
+            }),
+            AgentLimits {
+                max_concurrent_tasks: 1,
+                max_queued_tasks: 4,
+                max_input_bytes: 1024,
+                max_event_bytes: 256,
+                default_timeout: Duration::from_secs(30),
+            },
+        );
+        assert!(agent.has_skill("old-skill"));
+        assert!(!agent.has_skill("new-skill"));
+
+        // Hot-update (driver-mcp при tools/list_changed).
+        agent.update_skills(vec!["new-skill".into()]);
+
+        assert!(!agent.has_skill("old-skill"), "old skill must be replaced");
+        assert!(agent.has_skill("new-skill"), "new skill must be visible");
+        assert_eq!(agent.skills(), vec!["new-skill".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn resolve_uses_updated_skills_after_hot_update() {
+        let registry = AgentRegistry::new();
+        registry.register(RegisteredAgent::new(
+            AgentId("hot-update".into()),
+            vec!["old-skill".into()],
+            Arc::new(BlockingDriver {
+                release: Arc::new(tokio::sync::Notify::new()),
+            }),
+            AgentLimits {
+                max_concurrent_tasks: 1,
+                max_queued_tasks: 4,
+                max_input_bytes: 1024,
+                max_event_bytes: 256,
+                default_timeout: Duration::from_secs(30),
+            },
+        ));
+
+        let request_old = InvokeRequest {
+            task_id: None,
+            agent_id: None,
+            skill_id: Some("old-skill".into()),
+            idempotency_key: "k".into(),
+            session_id: None,
+            input: Vec::new(),
+            context: serde_json::Value::Null,
+            deadline: None,
+        };
+        assert!(registry.resolve(&request_old).is_ok());
+
+        // Hot-update: старый skill исчезает, появляется новый.
+        let agent = registry.get(&AgentId("hot-update".into())).unwrap();
+        agent.update_skills(vec!["new-skill".into()]);
+
+        assert!(
+            registry.resolve(&request_old).is_err(),
+            "old skill must no longer resolve after hot update"
+        );
+        let request_new = InvokeRequest {
+            task_id: None,
+            agent_id: None,
+            skill_id: Some("new-skill".into()),
+            idempotency_key: "k2".into(),
+            session_id: None,
+            input: Vec::new(),
+            context: serde_json::Value::Null,
+            deadline: None,
+        };
+        assert!(
+            registry.resolve(&request_new).is_ok(),
+            "new skill must resolve after hot update"
+        );
     }
 }

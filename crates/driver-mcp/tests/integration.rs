@@ -64,6 +64,8 @@ async fn discovery_finds_counter_tools() {
         counter_config(),
         Vec::new(),
         Duration::from_secs(5),
+        adapter_model::AgentId("test-counter".into()),
+        std::sync::Weak::new(),
     )
     .await
     .expect("connect to counter server");
@@ -88,6 +90,8 @@ async fn invoke_get_value_completes_with_text() {
         counter_config(),
         vec!["get_value".to_string(), "increment".to_string()],
         Duration::from_secs(5),
+        adapter_model::AgentId("test-counter".into()),
+        std::sync::Weak::new(),
     )
     .await
     .expect("connect to counter server");
@@ -138,6 +142,8 @@ async fn cancel_long_task_delivers_cancelled_and_no_orphan_tasks() {
         counter_config(),
         vec!["long_task".to_string()],
         Duration::from_secs(30),
+        adapter_model::AgentId("test-counter".into()),
+        std::sync::Weak::new(),
     )
     .await
     .expect("connect to counter server");
@@ -186,6 +192,8 @@ async fn input_schema_validation_rejects_missing_required_field() {
         counter_config(),
         vec!["echo".to_string()],
         Duration::from_secs(5),
+        adapter_model::AgentId("test-counter".into()),
+        std::sync::Weak::new(),
     )
     .await
     .expect("connect to counter server");
@@ -261,6 +269,8 @@ async fn http_transport_full_roundtrip() {
         counter_http_config(&http_addr),
         vec!["increment".to_string(), "get_value".to_string()],
         Duration::from_secs(5),
+        adapter_model::AgentId("test-counter".into()),
+        std::sync::Weak::new(),
     )
     .await
     .expect("connect to counter http server");
@@ -294,6 +304,8 @@ async fn protocol_version_is_verified_on_connect() {
         counter_config(),
         vec!["get_value".to_string()],
         Duration::from_secs(5),
+        adapter_model::AgentId("test-counter".into()),
+        std::sync::Weak::new(),
     )
     .await
     .expect("connect must succeed with supported protocol version");

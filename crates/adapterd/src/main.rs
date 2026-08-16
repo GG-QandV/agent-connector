@@ -143,7 +143,7 @@ impl Daemon {
         let store = build_store(&config).await?;
         let registry = Arc::new(AgentRegistry::new());
         for agent in &config.agents {
-            match build_driver(agent).await {
+            match build_driver(agent, Arc::downgrade(&registry)).await {
                 Ok(driver) => {
                     registry.register(RegisteredAgent::new(
                         adapter_model::AgentId(agent.id.clone()),
@@ -288,7 +288,10 @@ async fn build_store(config: &Config) -> Result<Arc<dyn TaskStore>, StartupError
     }
 }
 
-async fn build_driver(agent: &config::AgentConfig) -> Result<Arc<dyn AgentDriver>, StartupError> {
+async fn build_driver(
+    agent: &config::AgentConfig,
+    registry: std::sync::Weak<AgentRegistry>,
+) -> Result<Arc<dyn AgentDriver>, StartupError> {
     match &agent.transport {
         AgentTransportConfig::Stdio {
             command,
@@ -342,6 +345,8 @@ async fn build_driver(agent: &config::AgentConfig) -> Result<Arc<dyn AgentDriver
                         },
                         allowed_tools.clone(),
                         Duration::from_secs(agent.limits.default_timeout_seconds),
+                        adapter_model::AgentId(agent.id.clone()),
+                        registry.clone(),
                     )
                     .await
                     .map_err(|e: McpDriverError| StartupError::Driver(e.to_string()))?,
@@ -371,12 +376,14 @@ async fn build_driver(agent: &config::AgentConfig) -> Result<Arc<dyn AgentDriver
                             },
                             allowed_tools.clone(),
                             Duration::from_secs(agent.limits.default_timeout_seconds),
+                            adapter_model::AgentId(agent.id.clone()),
+                            registry.clone(),
                         )
                         .await
                         .map_err(|e: McpDriverError| StartupError::Driver(e.to_string()))?
                     }
                 };
-                Ok::<_, StartupError>(Arc::new(driver) as Arc<dyn AgentDriver>)
+                Ok::<_, StartupError>(driver as Arc<dyn AgentDriver>)
             };
             // discovery_timeout_seconds ограничивает весь connect + tools/list.
             // Если discovery не уложился — агент не поднимается, остальные
