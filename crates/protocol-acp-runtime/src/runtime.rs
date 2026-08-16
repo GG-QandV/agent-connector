@@ -52,10 +52,10 @@ impl AcpHandler for AdapterCore {
 #[derive(Clone, Debug)]
 pub struct AcpRuntimeConfig {
     pub max_line_bytes: usize,
-    /// Зарезервировано: окно ожидания завершения in-flight запросов после
-    /// `shutdown`. Текущий цикл `run` строго sequential (по одной строке за
-    /// раз), поэтому активных запросов на момент drain нет — поле оставлено
-    /// для будущей конкурентной обработки и не влияет на поведение сейчас.
+    /// Окно ожидания завершения in-flight запросов после `shutdown`.
+    /// Используется `run_with_shutdown`: после внешнего shutdown-сигнала
+    /// runtime отвергает новые top-level requests и ждёт завершения текущей
+    /// строки не дольше этого таймаута.
     pub shutdown_grace: std::time::Duration,
     pub agent_id: String,
     pub agent_name: String,
@@ -385,6 +385,27 @@ impl<R: AsyncBufRead + Unpin + Send, W: AsyncWrite + Unpin + Send> AcpRuntime<R,
         }
         debug!("acp runtime loop exited");
     }
+
+    /// Запустить runtime с внешним shutdown-сигналом (например, SIGINT).
+    /// Как только `external_shutdown` срабатывает, runtime переходит в
+    /// draining: перестаёт принимать новые top-level requests (отвечая
+    /// клиенту явной ошибкой "server is shutting down"), ждёт завершения
+    /// уже читаемой строки в пределах `shutdown_grace`, затем возвращается.
+    pub async fn run_with_shutdown(&mut self, external_shutdown: CancellationToken) {
+        let grace = self.dispatcher.config.shutdown_grace;
+        tokio::select! {
+            _ = self.run() => {}
+            _ = external_shutdown.cancelled() => {
+                self.dispatcher.drain_token.cancel();
+                debug!("external shutdown signal received, draining ACP runtime");
+                // Даём текущему in-flight чтению/обработке строки шанс
+                // завершиться в пределах grace period, а не рвём соединение
+                // немедленно. run() сам продолжит читать stdin, но будет
+                // отвергать НОВЫЕ top-level requests из-за drain_token.
+                let _ = tokio::time::timeout(grace, self.run()).await;
+            }
+        }
+    }
 }
 
 async fn write_line<W: AsyncWrite + Unpin + Send>(writer: &mut W, response: JsonRpcResponse) {
@@ -580,5 +601,31 @@ mod tests {
             make_runtime("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/new\"}\n");
         runtime.run().await;
         assert!(!runtime.io.writer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn draining_rejects_requests_with_shutdown_error() {
+        let (mut runtime, _) = make_runtime(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/new\",\"params\":{}}\n",
+        );
+        runtime.drain_token().cancel();
+        runtime.run().await;
+        let out = lines(&runtime.io.writer);
+        assert_eq!(out.len(), 1);
+        let resp: JsonRpcResponse = serde_json::from_str(&out[0]).unwrap();
+        assert_eq!(resp.id, Some(JsonRpcId::Number(1)));
+        let error = resp.error.unwrap();
+        assert_eq!(error.code, codec::INTERNAL_ERROR);
+        assert!(error.message.contains("shutting down"));
+    }
+
+    #[tokio::test]
+    async fn draining_ignores_notifications_without_response() {
+        let (mut runtime, _) =
+            make_runtime("{\"jsonrpc\":\"2.0\",\"method\":\"session/new\",\"params\":{}}\n");
+        runtime.drain_token().cancel();
+        runtime.run().await;
+        // Notification во время draining не получает ответ (по контракту).
+        assert!(runtime.io.writer.is_empty());
     }
 }
