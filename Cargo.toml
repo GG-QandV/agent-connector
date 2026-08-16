@@ -14,7 +14,7 @@ members = [
     "crates/postgres-task-store-adapter",
     "crates/protocol-a2a-server",
     "crates/protocol-acp-runtime",
-    "crates/adapterd", "crates/driver-mcp",
+    "crates/adapterd", "crates/adapterctl",
 ]
 
 [workspace.package]
@@ -47,13 +47,14 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 futures-util = "0.3"
 http-body-util = "0.1"
+rand = "0.9"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "chrono", "uuid"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "signal"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 tower = { version = "0.5", features = ["util"] }

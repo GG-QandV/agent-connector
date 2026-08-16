@@ -1,0 +1,35 @@
+[package]
+name = "adapterctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "adapterctl"
+path = "src/main.rs"
+
+[dependencies]
+adapterd = { path = "../adapterd" }
+async-trait.workspace = true
+atty = "0.2"
+bollard = "0.17"
+chrono.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-postgres = "0.7"
+tracing.workspace = true
+uuid.workspace = true
+
+# TODO (не блокирует MVP):
+# - atty -> is-terminal (RUSTSEC-2021-0145, Windows redirected handles)
+# - sc.exe -> windows-service crate (нативная интеграция со stop/pause событиями)
+# - serde_yaml deprecated -> преемник (синхронно с adapterd, оба крейта на нём)
+
+[dev-dependencies]
+tempfile = "3"

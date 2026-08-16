@@ -9,7 +9,7 @@
 //! serde_yaml = "0.9"
 //! thiserror = "2"
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
@@ -18,7 +18,7 @@ use std::{
 };
 use thiserror::Error;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub mode: Mode,
@@ -36,7 +36,7 @@ pub struct Config {
 
 /// Bearer-token аутентификация JSON-RPC inbound.
 /// Пусто (по умолчанию) = auth отключена, используется `AllowAllPolicy`.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuthConfig {
     #[serde(default)]
     pub bearer_tokens: Vec<BearerTokenEntry>,
@@ -44,7 +44,7 @@ pub struct AuthConfig {
 
 /// Одна запись доступа: имя env-переменной с токеном -> caller identity.
 /// Секрет в конфиг не кладётся — только имя env-переменной.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BearerTokenEntry {
     pub token_env: String,
     pub caller_id: String,
@@ -52,7 +52,7 @@ pub struct BearerTokenEntry {
     pub allowed_scopes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     #[default]
@@ -60,7 +60,7 @@ pub enum Mode {
     Remote,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum StorageConfig {
     Memory,
@@ -85,7 +85,7 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     #[serde(default = "default_global_tasks")]
     pub max_concurrent_tasks: usize,
@@ -105,7 +105,7 @@ impl Default for RuntimeConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetentionConfig {
     #[serde(default = "default_task_days")]
     pub task_ttl_days: u64,
@@ -127,7 +127,7 @@ impl Default for RetentionConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub id: String,
     #[serde(default)]
@@ -138,7 +138,7 @@ pub struct AgentConfig {
     pub transport: AgentTransportConfig,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentLimitsConfig {
     #[serde(default = "default_agent_tasks")]
     pub max_concurrent_tasks: usize,
@@ -163,7 +163,7 @@ impl Default for AgentLimitsConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "driver", rename_all = "kebab-case")]
 pub enum AgentTransportConfig {
     Stdio {
@@ -197,7 +197,7 @@ pub enum AgentTransportConfig {
     },
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "mcp_transport", rename_all = "kebab-case")]
 pub enum McpTransportConfig {
     Stdio {

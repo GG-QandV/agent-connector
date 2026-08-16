@@ -86,12 +86,12 @@ Runtime может проверять (не создавать): доступе�
 
 ### Варианты установки
 
-| Выбор | Результат |
-|---|---|
-| SQLite | Binary + SQLite WAL файл, ничего больше |
-| Existing Postgres | Installer спрашивает DSN/schema, проверяет доступ, применяет migrations |
-| Managed Docker Postgres | Installer поднимает изолированный Postgres-контейнер только для adapter |
-| External managed Postgres | То же, что Existing Postgres: RDS, Neon, Supabase, Cloud SQL и т.д. |
+| Выбор                     | Результат                                                               |
+| ------------------------- | ----------------------------------------------------------------------- |
+| SQLite                    | Binary + SQLite WAL файл, ничего больше                                 |
+| Existing Postgres         | Installer спрашивает DSN/schema, проверяет доступ, применяет migrations |
+| Managed Docker Postgres   | Installer поднимает изолированный Postgres-контейнер только для adapter |
+| External managed Postgres | То же, что Existing Postgres: RDS, Neon, Supabase, Cloud SQL и т.д.     |
 
 ### Обязательные безопасные правила installer
 
@@ -208,17 +208,17 @@ pub struct CoreEvent {
 
 ### Жизненный цикл задачи — таблица переходов (canonical)
 
-| Команда/событие | Разрешено из | Новое состояние |
-|---|---|---|
-| `Invoke` | нет задачи | `Created`, затем `Accepted` |
-| connector `Accepted` | `Created` | `Accepted` |
-| connector `Progress` | `Accepted`, `Running` | `Running` |
-| connector `InputRequired` | `Accepted`, `Running` | `WaitingForInput` |
-| `ProvideInput` | `WaitingForInput` | `Running` |
-| `Cancel` | non-terminal | `CancelRequested` |
-| connector `Cancelled` | `CancelRequested` | `Cancelled` |
-| connector `Completed` | `Accepted`, `Running`, `WaitingForInput` | `Completed` |
-| connector `Failed` | non-terminal | `Failed` |
+| Команда/событие           | Разрешено из                             | Новое состояние             |
+| ------------------------- | ---------------------------------------- | --------------------------- |
+| `Invoke`                  | нет задачи                               | `Created`, затем `Accepted` |
+| connector `Accepted`      | `Created`                                | `Accepted`                  |
+| connector `Progress`      | `Accepted`, `Running`                    | `Running`                   |
+| connector `InputRequired` | `Accepted`, `Running`                    | `WaitingForInput`           |
+| `ProvideInput`            | `WaitingForInput`                        | `Running`                   |
+| `Cancel`                  | non-terminal                             | `CancelRequested`           |
+| connector `Cancelled`     | `CancelRequested`                        | `Cancelled`                 |
+| connector `Completed`     | `Accepted`, `Running`, `WaitingForInput` | `Completed`                 |
+| connector `Failed`        | non-terminal                             | `Failed`                    |
 
 Повтор `Cancel` — идемпотентен. `Complete` после `Cancelled` — отвергается, логируется как protocol violation (не просто silently ignored).
 
@@ -361,14 +361,14 @@ Canonical требует `/healthz`/`/readyz` (реализовано, подт�
 
 ### План реализации по этапам (canonical roadmap) — маппинг на текущий статус
 
-| Этап | Canonical содержимое | Текущий статус в agent-connector |
-|---|---|---|
-| 0 — contracts и тесты | model, transition tests, fake connector, memory store | ✅ В основном есть (adapter-model, memory-task-store); transition tests как unit tests — не подтверждено покрытие |
-| 1 — local MVP | StdioConnector, in-memory registry, core invoke/cancel/status, ACP stdio adapter | ✅ driver-stdio, AgentRegistry, AdapterCore, protocol-acp-runtime — все есть |
-| 2 — remote MVP | HttpSseConnector, A2A HTTP/SSE server, bearer auth, SQLite journal, resume by seq, idempotency | ⚠️ Частично: driver-http-sse и protocol-a2a-server есть, SQLite есть, idempotency есть; **bearer auth — нет** (PolicyEngine = AllowAllPolicy) |
-| 3 — reliable single-node production | retry/reconnect policy, leases, resource quotas, artifact store interface, OTel/metrics, Unix socket sidecar | ❌ Не начато: no leases, no per-caller quota, no artifact store abstraction, no OTel, no connector-unix-socket |
-| 4 — multi-instance | Postgres store, distributed leases, durable outbox, shared artifact store, mTLS/OIDC | ⚠️ Postgres store есть (не прогнан против живого PG), но без leases это не даёт реальной multi-instance safety |
-| 5 — new transports | WebSocket connector, gRPC connector, manifest discovery | ❌ Не начато |
+| Этап                                | Canonical содержимое                                                                                         | Текущий статус в agent-connector                                                                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0 — contracts и тесты               | model, transition tests, fake connector, memory store                                                        | ✅ В основном есть (adapter-model, memory-task-store); transition tests как unit tests — не подтверждено покрытие                              |
+| 1 — local MVP                       | StdioConnector, in-memory registry, core invoke/cancel/status, ACP stdio adapter                             | ✅ driver-stdio, AgentRegistry, AdapterCore, protocol-acp-runtime — все есть                                                                   |
+| 2 — remote MVP                      | HttpSseConnector, A2A HTTP/SSE server, bearer auth, SQLite journal, resume by seq, idempotency               | ⚠️ Частично: driver-http-sse и protocol-a2a-server есть, SQLite есть, idempotency есть; **bearer auth — нет** (PolicyEngine = AllowAllPolicy) |
+| 3 — reliable single-node production | retry/reconnect policy, leases, resource quotas, artifact store interface, OTel/metrics, Unix socket sidecar | ❌ Не начато: no leases, no per-caller quota, no artifact store abstraction, no OTel, no connector-unix-socket                                 |
+| 4 — multi-instance                  | Postgres store, distributed leases, durable outbox, shared artifact store, mTLS/OIDC                         | ⚠️ Postgres store есть (не прогнан против живого PG), но без leases это не даёт реальной multi-instance safety                                |
+| 5 — new transports                  | WebSocket connector, gRPC connector, manifest discovery                                                      | ❌ Не начато                                                                                                                                   |
 
 ### Критерии готовности MVP (canonical, дословно) — сверка
 
