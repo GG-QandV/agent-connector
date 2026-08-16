@@ -84,6 +84,25 @@ readiness false → ожидание/отмена активных задач в
 закрытие protocol streams. Поле `runtime.shutdown_grace_seconds` заложено в
 конфиг.
 
+## Bearer token parsing edge cases (resolve_caller)
+
+Открытые code-review todo для `resolve_caller()` в
+`crates/protocol-a2a-server/src/executor.rs`. Архитектура подтверждена
+(`ServiceParams` → `ExecutorContext.service_params`, см.
+`docs/design/auth-architecture.md`), остались осознанные решения по edge cases:
+
+1. **Множественные `Authorization` headers.** `extract_service_params`
+   сохраняет `Vec<String>` "в порядке вставки" — если клиент присылает два
+   `Authorization` header, `resolve_caller()` сейчас молча берёт `.first()`.
+   Решение должно быть осознанным: брать первый / отклонять как invalid /
+   брать последний.
+2. **Точный префикс `"Bearer "`.** `strip_prefix("Bearer ")` case-sensitive с
+   ровно одним пробелом. HTTP spec case-sensitive для scheme name, но решить
+   явно, разрешать ли lowercase `"bearer"`.
+3. **Пустой токен после `"Bearer "`.** `"Bearer "` (пробел без токена) —
+   валидный по формату header; сейчас `strip_prefix` даёт `Some("")` →
+   `resolve("")` → `None` → 401, но добавить явную проверку для ясности.
+
 ## Incident checklist
 
 1. Сервис не стартует → проверь `RUST_LOG=debug`, валидность YAML,
