@@ -38,6 +38,11 @@ enum StartupError {
 
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
+    // Чтение .env ДО инициализации tracing: RUST_LOG сам может быть задан
+    // через .env файл (не только в launchd EnvironmentVariables) — если
+    // читать .env после init, try_from_default_env() уже прошёл.
+    load_env_file_if_requested();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -52,6 +57,30 @@ async fn main() -> Result<(), StartupError> {
     let daemon = Daemon::build(config).await?;
     daemon.run().await;
     Ok(())
+}
+
+/// Если `ADAPTERD_ENV_FILE` задан (macOS launchd путь — systemd делает это
+/// сам через `EnvironmentFile=`, launchd не умеет) — прочитать `.env` файл и
+/// проставить переменные в process env ДО чтения конфига. Без этого DSN/
+/// секреты не долетают до процесса на macOS, и adapterd падает на попытке
+/// подключения к БД.
+fn load_env_file_if_requested() {
+    let Ok(env_file_path) = std::env::var("ADAPTERD_ENV_FILE") else {
+        return;
+    };
+    let Ok(contents) = std::fs::read_to_string(&env_file_path) else {
+        tracing::warn!(path = %env_file_path, "ADAPTERD_ENV_FILE set but file unreadable");
+        return;
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            std::env::set_var(key.trim(), value.trim());
+        }
+    }
 }
 
 struct Daemon {

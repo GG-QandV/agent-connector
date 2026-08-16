@@ -5,6 +5,8 @@
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
@@ -64,8 +66,6 @@ pub trait PlatformServiceManager: Send + Sync {
 }
 
 /// Выбирает реализацию `PlatformServiceManager` для текущей ОС.
-/// macOS пока не имеет launchd-реализации — возвращает заглушку, которая
-/// корректно фейлится `Unsupported` на каждой операции (см. macos.rs).
 pub fn platform_manager() -> Result<Box<dyn PlatformServiceManager>, PlatformError> {
     #[cfg(target_os = "windows")]
     {
@@ -77,7 +77,7 @@ pub fn platform_manager() -> Result<Box<dyn PlatformServiceManager>, PlatformErr
     }
     #[cfg(target_os = "macos")]
     {
-        Ok(Box::new(macos::MacOsUnsupported))
+        Ok(Box::new(macos::Launchd))
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
@@ -100,48 +100,4 @@ pub fn generate_secure_password() -> String {
             CHARS[idx] as char
         })
         .collect()
-}
-
-/// macOS-заглушка: launchd-реализация не написана (см. LOCAL_AGENT_
-/// ADAPTERCTL_INSTALL_FILES.md — "Ещё не написано вообще"). Все методы
-/// честно возвращают Unsupported, чтобы adapterctl не мог молча сделать
-/// вид, что служба зарегистрирована.
-#[cfg(target_os = "macos")]
-pub mod macos {
-    use super::{PlatformError, PlatformServiceManager, ServiceContext};
-    use std::path::Path;
-
-    pub struct MacOsUnsupported;
-
-    impl PlatformServiceManager for MacOsUnsupported {
-        fn ensure_service_user(&self, _name: &str) -> Result<(), PlatformError> {
-            Err(PlatformError::Unsupported(
-                "macOS service user management is not yet implemented (launchd)".into(),
-            ))
-        }
-        fn register_service(&self, _ctx: &ServiceContext) -> Result<(), PlatformError> {
-            Err(PlatformError::Unsupported(
-                "macOS launchd service registration is not yet implemented".into(),
-            ))
-        }
-        fn unregister_service(&self, _name: &str) -> Result<(), PlatformError> {
-            Err(PlatformError::Unsupported(
-                "macOS launchd service unregistration is not yet implemented".into(),
-            ))
-        }
-        fn start_service(&self, _name: &str) -> Result<(), PlatformError> {
-            Err(PlatformError::Unsupported(
-                "macOS launchd service start is not yet implemented".into(),
-            ))
-        }
-        fn restrict_file_permissions(
-            &self,
-            _path: &Path,
-            _owner: &str,
-        ) -> Result<(), PlatformError> {
-            Err(PlatformError::Unsupported(
-                "macOS file permission restriction is not yet implemented".into(),
-            ))
-        }
-    }
 }
