@@ -2,41 +2,30 @@
 //!
 //! Идентичен по алгоритму серверной половине (gatewayd/src/dialect_probe.rs):
 //! пробуем SDK (GetTask/{"name":"tasks/<uuid>"}), затем Spec (tasks/get/
-//! {"id":"<uuid>"}); решение — по ДВУМ независимым признакам "метод не
-//! распознан": коду -32601 (стандарт JSON-RPC 2.0) ЛИБО нормализованному
-//! тексту ошибки, содержащему "method not found" (покрывает наш маркер
-//! шлюза "method_not_found:", стандартное "Method not found" и lowercase —
-//! см. looks_like_method_not_found и error.rs::from_jsonrpc_error).
+//! {"id":"<uuid>"}).
+//!
+//! ИСПРАВЛЕНО (D1): распознавание "метод не найден" раньше строилось на
+//! одной точной подстроке "method_not_found:" — специфичной именно нашему
+//! собственному шлюзу (ACP-A2A_gateway::dispatch_a2a_method). Стандартный
+//! JSON-RPC 2.0 сервер отвечает на неизвестный метод кодом -32601 с текстом
+//! "Method not found" (заглавные, без двоеточия) — старая проверка это
+//! пропускала: probe_recognizes возвращал Ok(true) на любом ответе без
+//! точного маркера, включая стандартный -32601, и диалект ошибочно
+//! принимался за распознанный. Первый реальный вызов после такого
+//! ложного распознавания падал.
+//!
+//! Теперь распознавание — по коду -32601 (стандарт JSON-RPC 2.0:
+//! https://www.jsonrpc.org/specification#error_object) ИЛИ по
+//! нормализованному (lowercase) тексту, содержащему один из нескольких
+//! известных вариантов формулировки: "method not found" (стандарт),
+//! "method_not_found" (наш шлюз), "unknown method" (некоторые сторонние
+//! реализации). Симметрично исправлению gatewayd/src/dialect_probe.rs.
 
 use crate::error::A2aClientError;
 use crate::wire::{sdk::A2aSdkWire, spec::A2aSpecWire, A2aOperation, A2aWire};
-use serde_json::Value as JsonValue;
+use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
-
-/// Детект по Agent Card (ТЗ §3.2 п.4).
-///
-/// ВАЖНО (D2, честное признание — не заглушка "для вида"): канал сейчас
-/// НЕФУНКЦИОНАЛЕН и намеренно всегда возвращает None. Причина
-/// семантическая: поле `protocolVersion` спеки AgentCard описывает версию
-/// A2A-протокола ("1.0", "0.9", ...), а НЕ выбор wire-реализации
-/// (sdk vs spec). Прежний маппинг "1.x -> Sdk, 0.x -> Spec" был ошибкой:
-/// шлюз на спеке 1.0 с плоским Task честно отдаст "1.0" в карточке, но
-/// это spec-диалект, а не sdk. Спека не содержит поля, которое надёжно
-/// отличало бы wire-реализацию, поэтому единственно корректное поведение —
-/// None: резолюция (resolve_auto_wire) падает на эмпирический зонд,
-/// который хотя бы проверяет реальное поведение endpoint.
-///
-/// Функция оставлена как ТОЧКА РАСШИРЕНИЯ: если спека когда-нибудь
-/// добавит поле, отличающее wire-реализацию, детект реализуется здесь —
-/// порядок в resolve_auto_wire() (AgentCard первым, зонд fallback) менять
-/// не придётся.
-pub async fn detect_from_agent_card(
-    _client: &reqwest::Client,
-    _agent_card_url: &str,
-) -> Option<Arc<dyn A2aWire>> {
-    None
-}
 
 pub async fn probe_wire_format(
     client: &reqwest::Client,
@@ -82,6 +71,22 @@ pub async fn probe_wire_format(
     ))
 }
 
+/// ИСПРАВЛЕНО (D1): проверяет код -32601 (стандартный JSON-RPC 2.0
+/// "Method not found") ИЛИ нормализованный текст с несколькими известными
+/// формулировками — не одну точную подстроку конкретного шлюза.
+fn looks_like_method_not_found(code: i64, message: &str) -> bool {
+    const JSONRPC_STANDARD_METHOD_NOT_FOUND: i64 = -32601;
+
+    if code == JSONRPC_STANDARD_METHOD_NOT_FOUND {
+        return true;
+    }
+
+    let normalized = message.to_lowercase();
+    normalized.contains("method not found")
+        || normalized.contains("method_not_found")
+        || normalized.contains("unknown method")
+}
+
 async fn probe_recognizes(
     client: &reqwest::Client,
     endpoint: &str,
@@ -108,53 +113,96 @@ async fn probe_recognizes(
         .send()
         .await
         .map_err(|e| A2aClientError::Http(e.to_string()))?;
-    let body: JsonValue = resp
+    let body: Value = resp
         .json()
         .await
         .map_err(|e| A2aClientError::Http(e.to_string()))?;
 
     if let Some(error) = body.get("error") {
-        let code = error
-            .get("code")
-            .and_then(JsonValue::as_i64)
-            .unwrap_or(-32000);
-        let message = error
-            .get("message")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("");
+        let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
+        let message = error.get("message").and_then(Value::as_str).unwrap_or("");
         return Ok(!looks_like_method_not_found(code, message));
     }
 
     Ok(true)
 }
 
-/// Распознаёт "метод не найден" в JSON-RPC-ошибке по ДВУМ независимым
-/// признакам (D1):
-///   1. code == -32601 — стандарт JSON-RPC 2.0, зарезервирован ровно под
-///      "Method not found". Любой сервер, отвечающий по спеке (не только
-///      наш шлюз), вернёт его на неизвестный метод — без нашего
-///      специфичного маркера.
-///   2. Нормализованный текст ошибки содержит подстроку "method not found".
-///      Нормализация = lowercase + '_' -> ' ', поэтому покрываются три
-///      варианта формулировки: наш маркер шлюза "method_not_found:<name>",
-///      стандартный JSON-RPC "Method not found" и распространённый
-///      lowercase "method not found".
-///
-/// До D1-фикса зонд смотрел только на подстроку "method_not_found:" и
-/// ложно принимал стандартный ответ -32601 "Method not found" за признак
-/// того, что диалект подходит (маркер не найден -> Ok(true)), т.е. считал
-/// неверный диалект распознанным.
-fn looks_like_method_not_found(code: i64, message: &str) -> bool {
-    if code == -32601 {
-        return true;
-    }
-    let normalized = message.to_lowercase().replace('_', " ");
-    normalized.contains("method not found")
+/// ИСПРАВЛЕНО (D2): protocolVersion в AgentCard — версия A2A СПЕЦИФИКАЦИИ,
+/// а не идентификатор wire-реализации конкретного сервера. Сервер на спеке
+/// 1.0 может отвечать плоским Task (наш "spec"-диалект), просто
+/// задекларировав актуальную версию протокола. Маппинг protocolVersion ->
+/// wire был семантически неверной эвристикой (случайно совпадала для нашей
+/// пары adapterd=SDK/шлюз=Spec, но не является свойством протокола).
+/// Функция оставлена явной точкой расширения (возвращает None всегда) —
+/// спека AgentCard сейчас не содержит поля, которое надёжно отличало бы
+/// SDK-диалект от Spec-диалекта; реальный детект — только через
+/// эмпирический probe_wire_format выше.
+pub async fn detect_from_agent_card(
+    _client: &reqwest::Client,
+    _agent_card_url: &str,
+) -> Option<Arc<dyn A2aWire>> {
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn looks_like_method_not_found_recognizes_standard_jsonrpc_code() {
+        assert!(looks_like_method_not_found(-32601, "Method not found"));
+    }
+
+    #[test]
+    fn looks_like_method_not_found_recognizes_our_gateway_format() {
+        assert!(looks_like_method_not_found(-32000, "method_not_found: SendMessage"));
+    }
+
+    #[test]
+    fn looks_like_method_not_found_recognizes_unknown_method_phrasing() {
+        assert!(looks_like_method_not_found(-32000, "Unknown method: foo"));
+    }
+
+    #[test]
+    fn looks_like_method_not_found_is_case_insensitive() {
+        assert!(looks_like_method_not_found(-32000, "METHOD NOT FOUND"));
+    }
+
+    #[test]
+    fn looks_like_method_not_found_rejects_unrelated_errors() {
+        assert!(!looks_like_method_not_found(-32001, "task not found: tasks/deadbeef"));
+        assert!(!looks_like_method_not_found(-32000, "internal server error"));
+    }
+
+    #[tokio::test]
+    async fn probe_recognizes_sdk_with_standard_jsonrpc_method_not_found_on_wrong_dialect() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({ "method": "GetTask" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": { "code": -32601, "message": "Method not found" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({ "method": "tasks/get" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": { "code": -32001, "message": "task not found" }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let wire = probe_wire_format(&client, &server.uri(), None)
+            .await
+            .expect("must fall back to spec, not be fooled by standard -32601");
+        assert_eq!(wire.name(), "spec");
+    }
 
     #[tokio::test]
     async fn probe_recognizes_sdk_when_server_understands_get_task() {
@@ -184,9 +232,7 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({ "method": "GetTask" }),
-            ))
+            .and(body_partial_json(serde_json::json!({ "method": "GetTask" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jsonrpc": "2.0", "id": 1,
                 "error": { "code": -32000, "message": "method_not_found: GetTask" }
@@ -194,9 +240,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({ "method": "tasks/get" }),
-            ))
+            .and(body_partial_json(serde_json::json!({ "method": "tasks/get" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "jsonrpc": "2.0", "id": 1,
                 "error": { "code": -32001, "message": "task not found" }
@@ -231,89 +275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_falls_back_to_spec_when_standard_jsonrpc_method_not_found() {
-        // D1-регрессия: сервер, отвечающий СТАНДАРТНЫМ JSON-RPC -32601
-        // "Method not found" (без нашего маркера "method_not_found:"), на
-        // GetTask. До фикса зонд ложно принимал такой ответ за признак
-        // SDK-диалекта. Теперь -32601 распознаётся как "метод не найден",
-        // и зонд корректно падает на spec.
-        use wiremock::matchers::{body_partial_json, method};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({ "method": "GetTask" }),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0", "id": 1,
-                "error": { "code": -32601, "message": "Method not found" }
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({ "method": "tasks/get" }),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0", "id": 1,
-                "error": { "code": -32001, "message": "task not found" }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = reqwest::Client::new();
-        let wire = probe_wire_format(&client, &server.uri(), None)
-            .await
-            .expect("must fall back to spec when SDK answers standard -32601 Method not found");
-        assert_eq!(wire.name(), "spec");
-    }
-
-    #[tokio::test]
-    async fn probe_falls_back_to_spec_when_textual_method_not_found_variants() {
-        // D1: тот же сценарий через нормализованный текст — сервер отвечает
-        // lowercase "method not found" (без кода -32601 и без маркера
-        // шлюза). Три варианта формулировки сводятся нормализацией к одной
-        // подстроке "method not found".
-        use wiremock::matchers::{body_partial_json, method};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({ "method": "GetTask" }),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0", "id": 1,
-                "error": { "code": -32000, "message": "method not found" }
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({ "method": "tasks/get" }),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0", "id": 1,
-                "error": { "code": -32001, "message": "task not found" }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = reqwest::Client::new();
-        let wire = probe_wire_format(&client, &server.uri(), None)
-            .await
-            .expect("must fall back to spec on textual 'method not found' variant");
-        assert_eq!(wire.name(), "spec");
-    }
-
-    #[tokio::test]
-    async fn agent_card_always_returns_none_until_spec_grows_a_wire_field() {
-        // D2: детект по Agent Card НЕФУНКЦИОНАЛЕН — спека AgentCard не
-        // содержит поля, надёжно отличающего wire-реализацию (protocolVersion
-        // — версия протокола, не выбор реализации). detect_from_agent_card
-        // всегда возвращает None, резолюция падает на зонд. Даже с доступной
-        // карточкой с protocolVersion 1.0 не угадываем wire.
+    async fn detect_from_agent_card_always_returns_none_by_design() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -321,9 +283,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/.well-known/agent.json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "name": "test-agent",
-                "protocolVersion": "1.0",
-                "url": "https://example.com/rpc"
+                "protocolVersion": "1.0"
             })))
             .mount(&server)
             .await;
@@ -333,7 +293,7 @@ mod tests {
         let result = detect_from_agent_card(&client, &card_url).await;
         assert!(
             result.is_none(),
-            "agent card must not guess wire from protocolVersion — fall through to probe (D2)"
+            "protocolVersion must not be used to guess wire dialect (D2 fix)"
         );
     }
 }
