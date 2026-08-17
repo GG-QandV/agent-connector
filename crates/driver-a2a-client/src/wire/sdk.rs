@@ -123,9 +123,14 @@ impl A2aWire for A2aSdkWire {
         };
 
         let status_message = task
-            .pointer("/status/message/parts/0/text")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+            .pointer("/status/message/parts")
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .collect::<String>()
+            });
 
         let mut output_parts = Vec::new();
         if let Some(artifacts) = task.get("artifacts").and_then(Value::as_array) {

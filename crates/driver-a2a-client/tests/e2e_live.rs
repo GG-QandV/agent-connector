@@ -27,6 +27,21 @@ fn e2e_token() -> Option<String> {
     Some(std::env::var("E2E_TOKEN").unwrap_or_else(|_| "t-e2e-001".into()))
 }
 
+fn e2e_sdk_endpoint() -> String {
+    std::env::var("E2E_SDK_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:8349/".into())
+}
+
+fn build_sdk_driver() -> A2aClientDriver {
+    A2aClientDriver::new(A2aClientConfig {
+        endpoint: e2e_sdk_endpoint(),
+        token: None,
+        wire_format: A2aWireFormat::Sdk,
+        timeout_secs: 120,
+        agent_card_url: None,
+    })
+    .expect("driver builds")
+}
+
 fn build_driver(wire_format: A2aWireFormat) -> A2aClientDriver {
     A2aClientDriver::new(A2aClientConfig {
         endpoint: e2e_endpoint(),
@@ -101,6 +116,38 @@ async fn e2e_auto_wire_probe_resolves_spec_and_invoke_completes() {
         "hermes must echo E2E_AUTO, got: {text:?}"
     );
     println!("E2E auto OK: task={} text={text:?}", task.id);
+}
+
+/// Живой E2E по SDK-wire: SendMessage -> наш adapterd (SDK-сервер) ->
+/// A2aClient-агент (spec) -> шлюз -> hermes. Требует поднятых adapterd
+/// (127.0.0.1:8349, агент hermes-sdk-e2e = a2a-client spec на шлюз) и шлюза.
+#[tokio::test]
+#[ignore]
+async fn e2e_sdk_wire_invoke_to_adapterd_returns_completed() {
+    let driver = build_sdk_driver();
+
+    let task = driver
+        .invoke("Reply with exactly: SDK_OK", None, None)
+        .await
+        .expect("live invoke via adapterd SDK wire must succeed");
+
+    assert_eq!(
+        task.state,
+        driver_a2a_client::wire::NormalizedState::Completed,
+        "task must complete via full SDK chain, got state={:?}",
+        task.state
+    );
+    let text: String = task
+        .output_parts
+        .iter()
+        .filter_map(|p| p.text.as_deref())
+        .collect::<String>()
+        + task.status_message.as_deref().unwrap_or("");
+    assert!(
+        text.contains("SDK_OK"),
+        "hermes must echo SDK_OK through the SDK chain, got: {text:?}"
+    );
+    println!("E2E sdk OK: task={} text={text:?}", task.id);
 }
 
 /// Вспомогательный smoke: card недоступен/нет protocolVersion — драйвер всё

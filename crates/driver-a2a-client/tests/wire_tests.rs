@@ -70,6 +70,39 @@ fn sdk_parse_task_unknown_state_is_explicit_error_not_silent_default() {
     assert!(msg.contains("unknown task state"));
 }
 
+#[test]
+fn sdk_parse_task_concatenates_all_status_message_parts() {
+    // Регрессия, найденная живым E2E (adapterd SDK): hermes отвечает
+    // несколькими parts в status.message.parts ("SD"/"K"/"_OK"). Раньше
+    // бралась только parts[0] — остальной текст терялся. Spec-wire уже
+    // конкатенирует все текстовые части; теперь sdk-wire делает то же.
+    let wire = A2aSdkWire;
+    let payload = json!({
+        "task": {
+            "id": "task-sdk-parts",
+            "contextId": "ctx-1",
+            "status": {
+                "state": "TASK_STATE_COMPLETED",
+                "message": {
+                    "messageId": "m-1",
+                    "role": "ROLE_AGENT",
+                    "parts": [
+                        { "text": "SD" },
+                        { "text": "K" },
+                        { "text": "_OK" }
+                    ]
+                }
+            }
+        }
+    });
+    let task = wire.parse_task(&payload).expect("must parse");
+    assert_eq!(
+        task.status_message.as_deref(),
+        Some("SDK_OK"),
+        "all status message parts must be concatenated"
+    );
+}
+
 // ---------- Spec wire: unit ----------
 
 #[test]
