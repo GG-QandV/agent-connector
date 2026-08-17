@@ -237,6 +237,10 @@ pub enum A2aWireFormat {
     /// Семантический шлюз ACP-A2A_gateway: message/send, плоский Task,
     /// lowercase-состояния.
     Spec,
+    /// Диалект неизвестен на момент конфигурации — определяется зондом
+    /// (dialect_probe) при первом контакте, результат кэшируется.
+    /// Приоритет при неоднозначности — Sdk (§3.4 ТЗ).
+    Auto,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

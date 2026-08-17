@@ -430,6 +430,7 @@ async fn build_driver(
                 wire_format: match wire_format {
                     A2aWireFormat::Sdk => DriverA2aWireFormat::Sdk,
                     A2aWireFormat::Spec => DriverA2aWireFormat::Spec,
+                    A2aWireFormat::Auto => DriverA2aWireFormat::Auto,
                 },
                 timeout_secs: *request_timeout_seconds,
             };
