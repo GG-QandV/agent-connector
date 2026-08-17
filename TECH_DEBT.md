@@ -16,6 +16,10 @@
 
 ## Закрыто
 
+### 2026-08-17: живой E2E spec/auto через шлюз → hermes (ТЗ §2.6 п.4)
+- **Закрыто**: `crates/driver-a2a-client/tests/e2e_live.rs` (ignored-по-умолчанию): spec-wire invoke → Completed («E2E_OK»), auto-wire зонд на реальном шлюзе → Completed («E2E_AUTO»), smoke с bounded timeout. Проверено живьём: 3 passed. Запуск: `cargo test -p driver-a2a-client --test e2e_live -- --ignored --nocapture`.
+- **Не покрыто**: SDK-ветка (driver → наш adapterd как SDK-сервер) — требует поднятого adapterd с агентом, не тестировалась.
+
 ### 2026-08-17: коды ошибок DriverEvent не соответствовали ТЗ §2.5
 - **Закрыто**: `a2a_task_failed` → `a2a_remote_error` (task Failed/Rejected); `a2a_call_failed` разделён через `send_error_to_a2a_code` на `a2a_no_task` (нет result/task) и `a2a_remote_error` (прочее). 4 теста фиксируют маппинг. Коммит `9166c52`.
 
