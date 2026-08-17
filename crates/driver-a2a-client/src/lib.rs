@@ -219,7 +219,64 @@ impl A2aClientDriver {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            return Err(from_jsonrpc_error(code, message, method, wire.name()));
+            let first_error = from_jsonrpc_error(code, message, method, wire.name());
+
+            // D3: резолюция была Auto (self.wire.is_none()) и первая попытка
+            // дала MethodNotFound — пробуем ОДИН РАЗ заново
+            // resolve_auto_wire() (минуя кэш), вдруг зонд на этот раз
+            // выберет другой диалект. Например, если первая попытка
+            // ошибочно закэшировала неверный wire, или сервер временно
+            // вернул нестандартный ответ зонду. Не более одной повторной
+            // попытки — иначе риск бесконечного цикла на действительно
+            // недоступном сервере.
+            if self.wire.is_none() && matches!(first_error, A2aClientError::MethodNotFound { .. }) {
+                let retried_wire = self.resolve_auto_wire().await?;
+                let retried_method = retried_wire.jsonrpc_method(&op);
+                let retried_params = retried_wire.build_params(&op);
+                let retried_payload = json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": retried_method, "params": retried_params,
+                });
+                let mut retried_req = self
+                    .client
+                    .post(&self.config.endpoint)
+                    .json(&retried_payload);
+                if let Some(token) = &self.config.token {
+                    retried_req = retried_req.bearer_auth(token);
+                }
+                let retried_resp = retried_req
+                    .send()
+                    .await
+                    .map_err(|e| A2aClientError::Http(e.to_string()))?;
+                let retried_body: Value = retried_resp
+                    .json()
+                    .await
+                    .map_err(|e| A2aClientError::Http(e.to_string()))?;
+                if let Some(retried_err) = retried_body.get("error") {
+                    let rcode = retried_err
+                        .get("code")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(-32000);
+                    let rmessage = retried_err
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown error");
+                    return Err(from_jsonrpc_error(
+                        rcode,
+                        rmessage,
+                        retried_method,
+                        retried_wire.name(),
+                    ));
+                }
+                let retried_result = retried_body.get("result").ok_or_else(|| {
+                    A2aClientError::ProtocolError(
+                        "missing 'result' in JSON-RPC response (retry)".into(),
+                    )
+                })?;
+                return retried_wire.parse_task(retried_result);
+            }
+
+            return Err(first_error);
         }
 
         let result = body.get("result").ok_or_else(|| {
@@ -526,5 +583,134 @@ mod auto_wire_lib_tests {
             .await
             .expect("invoke must resolve wire via probe and then complete");
         assert_eq!(task.id, "task-auto-1");
+    }
+}
+
+#[cfg(test)]
+mod d3_and_d4_integration_tests {
+    use crate::{A2aClientConfig, A2aClientDriver, A2aWireFormat};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// D3: закэшированный (ошибочно выбранный на первом резолве) wire не
+    /// должен навечно ломать драйвер — при MethodNotFound на реальном
+    /// вызове происходит once-off повторная попытка. Зонд сначала
+    /// "обманут" (первый GetTask отвечает "task not found" -> SDK
+    /// распознан), но реальный SendMessage на SDK-путь падает с
+    /// MethodNotFound, а spec-путь работает. При повторном резолве зонд
+    /// честно отвечает "method_not_found: GetTask" -> падает на spec ->
+    /// message/send завершается успехом.
+    #[tokio::test]
+    async fn auto_wire_recovers_once_from_wrong_initial_guess() {
+        let server = MockServer::start().await;
+        let sdk_probe_calls = Arc::new(AtomicUsize::new(0));
+
+        Mock::given(method("POST"))
+            .respond_with({
+                let calls = sdk_probe_calls.clone();
+                move |req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let m = body
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                match m {
+                    "GetTask" => {
+                        let n = calls.fetch_add(1, Ordering::SeqCst);
+                        if n == 0 {
+                            // Первый зонд-вызов: SDK "подходит" (метод понят,
+                            // задачи нет — task not found). Это обман: реальный
+                            // SendMessage ниже вернёт MethodNotFound.
+                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "error": { "code": -32001, "message": "task not found" }
+                            }))
+                        } else {
+                            // Повторный зонд после D3-retry: теперь честно
+                            // сообщаем, что GetTask не распознан -> fallback на spec.
+                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1,
+                                "error": { "code": -32000, "message": "method_not_found: GetTask" }
+                            }))
+                        }
+                    }
+                    "SendMessage" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "error": { "code": -32601, "message": "Method not found" }
+                    })),
+                    "tasks/get" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "error": { "code": -32001, "message": "task not found" }
+                    })),
+                    "message/send" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {
+                            "id": "task-recovered",
+                            "status": { "state": "completed" },
+                            "artifacts": [{ "parts": [{ "kind": "text", "text": "recovered via spec" }] }]
+                        }
+                    })),
+                    _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "error": { "code": -32000, "message": "method_not_found: unexpected" }
+                    })),
+                }
+            }
+            })
+            .mount(&server)
+            .await;
+
+        let driver = A2aClientDriver::new(A2aClientConfig {
+            endpoint: server.uri(),
+            token: None,
+            wire_format: A2aWireFormat::Auto,
+            timeout_secs: 10,
+            agent_card_url: None,
+        })
+        .expect("driver builds");
+
+        let task = driver
+            .invoke("hello", None, None)
+            .await
+            .expect("must recover once and complete via spec after wrong initial guess");
+        assert_eq!(task.id, "task-recovered");
+        assert_eq!(sdk_probe_calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// D2/D4: agent_card_url задан и указывает на недоступный сервер —
+    /// resolve_auto_wire() должен не считать это фатальной ошибкой и
+    /// успешно упасть на зонд. detect_from_agent_card (D2) всегда
+    /// возвращает None, поэтому ошибка НЕ может прийти из карточки —
+    /// проверяем, что ошибка резолюции не утекла из card_url.
+    #[tokio::test]
+    async fn resolve_auto_wire_falls_through_to_probe_when_agent_card_configured_but_unreachable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": { "code": -32001, "message": "task not found" }
+            })))
+            .mount(&server)
+            .await;
+
+        let driver = A2aClientDriver::new(A2aClientConfig {
+            endpoint: server.uri(),
+            token: None,
+            wire_format: A2aWireFormat::Auto,
+            timeout_secs: 10,
+            agent_card_url: Some("http://127.0.0.1:1/.well-known/agent.json".to_string()),
+        })
+        .expect("driver builds");
+
+        let result = driver.get_task("probe-check").await;
+        match result {
+            Ok(_) => {}
+            Err(e) => assert!(
+                !e.to_string().contains("127.0.0.1:1"),
+                "error must not leak the unreachable agent_card_url — resolution should have fallen through to probe: {e}"
+            ),
+        }
     }
 }
