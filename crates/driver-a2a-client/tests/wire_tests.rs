@@ -172,6 +172,7 @@ async fn method_not_found_hint_mentions_wire_format_and_method() {
         token: None,
         wire_format: A2aWireFormat::Sdk,
         timeout_secs: 5,
+        agent_card_url: None,
     })
     .expect("driver builds");
 
@@ -202,6 +203,7 @@ async fn context_lost_error_is_distinct_from_generic_remote_error() {
         token: None,
         wire_format: A2aWireFormat::Spec,
         timeout_secs: 5,
+        agent_card_url: None,
     })
     .expect("driver builds");
 
@@ -242,6 +244,7 @@ async fn full_invoke_completes_via_sdk_wire() {
         token: None,
         wire_format: A2aWireFormat::Sdk,
         timeout_secs: 5,
+        agent_card_url: None,
     })
     .expect("driver builds");
 
@@ -275,6 +278,7 @@ async fn full_invoke_completes_via_spec_wire() {
         token: None,
         wire_format: A2aWireFormat::Spec,
         timeout_secs: 5,
+        agent_card_url: None,
     })
     .expect("driver builds");
 

@@ -210,6 +210,11 @@ pub enum AgentTransportConfig {
         /// или `spec` (семантический шлюз ACP-A2A_gateway).
         #[serde(default)]
         wire_format: A2aWireFormat,
+        /// URL Agent Card (обычно "<base>/.well-known/agent.json").
+        /// Используется при wire_format: auto — детект по protocolVersion
+        /// приоритетнее зонда (ТЗ §3.2 п.4).
+        #[serde(default)]
+        agent_card_url: Option<String>,
     },
     /// ACP (stdio JSON-RPC) клиент: adapterd спавнит внешний ACP-агент как
     /// child-процесс (ADR-0003).

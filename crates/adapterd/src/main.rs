@@ -408,6 +408,7 @@ async fn build_driver(
             allow_http_development,
             request_timeout_seconds,
             wire_format,
+            agent_card_url,
         } => {
             let url = Url::parse(endpoint).map_err(|e| {
                 StartupError::Driver(format!("invalid A2A endpoint for {}: {e}", agent.id))
@@ -433,6 +434,7 @@ async fn build_driver(
                     A2aWireFormat::Auto => DriverA2aWireFormat::Auto,
                 },
                 timeout_secs: *request_timeout_seconds,
+                agent_card_url: agent_card_url.clone(),
             };
             let driver =
                 A2aClientDriver::new(config).map_err(|e| StartupError::Driver(e.to_string()))?;

@@ -16,7 +16,7 @@ use adapter_core::{AgentDriver, CoreError, DriverCapabilities, DriverEvent};
 use adapter_model::{InvokeRequest, Part, PublicError, TaskId};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use dialect_probe::probe_wire_format;
+use dialect_probe::{detect_from_agent_card, probe_wire_format};
 use error::{from_jsonrpc_error, A2aClientError};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -46,6 +46,12 @@ pub struct A2aClientConfig {
     pub token: Option<String>,
     pub wire_format: A2aWireFormat,
     pub timeout_secs: u64,
+    /// Опциональный URL карточки агента (обычно
+    /// "<base>/.well-known/agent.json"). Если задан и wire_format == Auto,
+    /// детект по protocolVersion пробуется ПЕРВЫМ, зонд — fallback, если
+    /// карточка недоступна или не содержит protocolVersion (ТЗ §3.2 п.4:
+    /// "предпочтительный канал определения (без probe)").
+    pub agent_card_url: Option<String>,
 }
 
 impl Default for A2aClientConfig {
@@ -55,6 +61,7 @@ impl Default for A2aClientConfig {
             token: None,
             wire_format: A2aWireFormat::default(),
             timeout_secs: 30,
+            agent_card_url: None,
         }
     }
 }
@@ -112,15 +119,32 @@ impl A2aClientDriver {
             return Ok(w.clone());
         }
         self.auto_wire_cache
-            .get_or_try_init(|| {
-                probe_wire_format(
-                    &self.client,
-                    &self.config.endpoint,
-                    self.config.token.as_deref(),
-                )
-            })
+            .get_or_try_init(|| self.resolve_auto_wire())
             .await
             .cloned()
+    }
+
+    /// Порядок резолюции при Auto (ТЗ §3.2): сначала AgentCard.protocolVersion
+    /// (если agent_card_url задан) — предпочтительный канал, без побочных
+    /// эффектов и без сетевого зонда на сам endpoint. Если карточка
+    /// недоступна, не содержит protocolVersion, или agent_card_url не
+    /// сконфигурирован — fallback на probe_wire_format (зонд).
+    async fn resolve_auto_wire(&self) -> Result<Arc<dyn A2aWire>, A2aClientError> {
+        if let Some(card_url) = &self.config.agent_card_url {
+            if let Some(wire) = detect_from_agent_card(&self.client, card_url).await {
+                return Ok(wire);
+            }
+            // Карточка недоступна/неинформативна — не считаем это фатальной
+            // ошибкой, просто падаем на зонд ниже (по духу ТЗ: "предпочтительнее",
+            // не "обязательно").
+        }
+
+        probe_wire_format(
+            &self.client,
+            &self.config.endpoint,
+            self.config.token.as_deref(),
+        )
+        .await
     }
 
     /// Отправляет новое сообщение (SendMessage / message/send в зависимости
@@ -493,6 +517,7 @@ mod auto_wire_lib_tests {
             token: None,
             wire_format: A2aWireFormat::Auto,
             timeout_secs: 10,
+            agent_card_url: None,
         })
         .expect("driver builds even with Auto and no wire resolved yet");
 
