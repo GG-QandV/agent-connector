@@ -16,7 +16,7 @@ use adapter_core::{AgentDriver, CoreError, DriverCapabilities, DriverEvent};
 use adapter_model::{InvokeRequest, Part, PublicError, TaskId};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use dialect_probe::{detect_from_agent_card, probe_wire_format};
+use dialect_probe::probe_wire_format;
 use error::{from_jsonrpc_error, A2aClientError};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -46,12 +46,6 @@ pub struct A2aClientConfig {
     pub token: Option<String>,
     pub wire_format: A2aWireFormat,
     pub timeout_secs: u64,
-    /// Опциональный URL карточки агента (обычно
-    /// "<base>/.well-known/agent.json"). Если задан и wire_format == Auto,
-    /// детект по protocolVersion пробуется ПЕРВЫМ, зонд — fallback, если
-    /// карточка недоступна или не содержит protocolVersion (ТЗ §3.2 п.4:
-    /// "предпочтительный канал определения (без probe)").
-    pub agent_card_url: Option<String>,
 }
 
 impl Default for A2aClientConfig {
@@ -61,7 +55,6 @@ impl Default for A2aClientConfig {
             token: None,
             wire_format: A2aWireFormat::default(),
             timeout_secs: 30,
-            agent_card_url: None,
         }
     }
 }
@@ -118,33 +111,17 @@ impl A2aClientDriver {
         if let Some(w) = &self.wire {
             return Ok(w.clone());
         }
+
         self.auto_wire_cache
-            .get_or_try_init(|| self.resolve_auto_wire())
+            .get_or_try_init(|| {
+                probe_wire_format(
+                    &self.client,
+                    &self.config.endpoint,
+                    self.config.token.as_deref(),
+                )
+            })
             .await
             .cloned()
-    }
-
-    /// Порядок резолюции при Auto (ТЗ §3.2): сначала AgentCard.protocolVersion
-    /// (если agent_card_url задан) — предпочтительный канал, без побочных
-    /// эффектов и без сетевого зонда на сам endpoint. Если карточка
-    /// недоступна, не содержит protocolVersion, или agent_card_url не
-    /// сконфигурирован — fallback на probe_wire_format (зонд).
-    async fn resolve_auto_wire(&self) -> Result<Arc<dyn A2aWire>, A2aClientError> {
-        if let Some(card_url) = &self.config.agent_card_url {
-            if let Some(wire) = detect_from_agent_card(&self.client, card_url).await {
-                return Ok(wire);
-            }
-            // Карточка недоступна/неинформативна — не считаем это фатальной
-            // ошибкой, просто падаем на зонд ниже (по духу ТЗ: "предпочтительнее",
-            // не "обязательно").
-        }
-
-        probe_wire_format(
-            &self.client,
-            &self.config.endpoint,
-            self.config.token.as_deref(),
-        )
-        .await
     }
 
     /// Отправляет новое сообщение (SendMessage / message/send в зависимости
@@ -219,64 +196,7 @@ impl A2aClientDriver {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            let first_error = from_jsonrpc_error(code, message, method, wire.name());
-
-            // D3: резолюция была Auto (self.wire.is_none()) и первая попытка
-            // дала MethodNotFound — пробуем ОДИН РАЗ заново
-            // resolve_auto_wire() (минуя кэш), вдруг зонд на этот раз
-            // выберет другой диалект. Например, если первая попытка
-            // ошибочно закэшировала неверный wire, или сервер временно
-            // вернул нестандартный ответ зонду. Не более одной повторной
-            // попытки — иначе риск бесконечного цикла на действительно
-            // недоступном сервере.
-            if self.wire.is_none() && matches!(first_error, A2aClientError::MethodNotFound { .. }) {
-                let retried_wire = self.resolve_auto_wire().await?;
-                let retried_method = retried_wire.jsonrpc_method(&op);
-                let retried_params = retried_wire.build_params(&op);
-                let retried_payload = json!({
-                    "jsonrpc": "2.0", "id": 1,
-                    "method": retried_method, "params": retried_params,
-                });
-                let mut retried_req = self
-                    .client
-                    .post(&self.config.endpoint)
-                    .json(&retried_payload);
-                if let Some(token) = &self.config.token {
-                    retried_req = retried_req.bearer_auth(token);
-                }
-                let retried_resp = retried_req
-                    .send()
-                    .await
-                    .map_err(|e| A2aClientError::Http(e.to_string()))?;
-                let retried_body: Value = retried_resp
-                    .json()
-                    .await
-                    .map_err(|e| A2aClientError::Http(e.to_string()))?;
-                if let Some(retried_err) = retried_body.get("error") {
-                    let rcode = retried_err
-                        .get("code")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(-32000);
-                    let rmessage = retried_err
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error");
-                    return Err(from_jsonrpc_error(
-                        rcode,
-                        rmessage,
-                        retried_method,
-                        retried_wire.name(),
-                    ));
-                }
-                let retried_result = retried_body.get("result").ok_or_else(|| {
-                    A2aClientError::ProtocolError(
-                        "missing 'result' in JSON-RPC response (retry)".into(),
-                    )
-                })?;
-                return retried_wire.parse_task(retried_result);
-            }
-
-            return Err(first_error);
+            return Err(from_jsonrpc_error(code, message, method, wire.name()));
         }
 
         let result = body.get("result").ok_or_else(|| {
@@ -321,6 +241,12 @@ impl A2aClientDriver {
     }
 
     /// NormalizedTask -> DriverEvent (терминальное событие).
+    ///
+    /// ИСПРАВЛЕНО (ТЗ §2.5): раньше здесь был единый код "a2a_task_failed",
+    /// не совпадающий ни с одним из кодов таблицы §2.5 ("сервер вернул error
+    /// (JSON-RPC) -> DriverEvent::Failed с кодом a2a_remote_error"). Task в
+    /// состоянии Failed/Rejected — это именно тот случай, когда JSON-RPC
+    /// конверт успешен, но внутри Task содержится ошибка приложения A2A-уровня.
     fn task_to_terminal(task: &NormalizedTask) -> DriverEvent {
         match task.state {
             NormalizedState::Completed => {
@@ -333,11 +259,6 @@ impl A2aClientDriver {
             }
             NormalizedState::Failed | NormalizedState::Rejected => {
                 DriverEvent::Failed(PublicError {
-                    // ИСПРАВЛЕНО (ТЗ §2.5): «сервер вернул error (JSON-RPC) ->
-                    // DriverEvent::Failed с кодом a2a_remote_error». Task в
-                    // состоянии Failed/Rejected — это именно тот случай: сервер
-                    // ответил успешным JSON-RPC конвертом, но внутри Task
-                    // содержится ошибка приложения уровня A2A-задачи.
                     code: "a2a_remote_error".into(),
                     message: task
                         .status_message
@@ -372,22 +293,21 @@ impl A2aClientDriver {
                 | NormalizedState::Rejected
         )
     }
-}
 
-/// Маппинг A2aClientError -> код из ТЗ §2.5. ProtocolError с текстом
-/// "missing 'result'" — это ровно ситуация "result нет / нет task"
-/// (ТЗ: DriverEvent::Failed `a2a_no_task`). Всё остальное (RemoteError,
-/// MethodNotFound, ContextLost, Http) — сервер либо ответил ошибкой,
-/// либо недоступен: a2a_remote_error по умолчанию, это же ловит и случаи,
-/// прямо не расписанные в таблице §2.5 (несовпадение формата, недоступность
-/// сети) — таблица ТЗ покрывает не все ветки явно, поэтому a2a_remote_error
-/// используется как разумный fallback-код для "прочих" ошибок сервера/сети.
-fn send_error_to_a2a_code(e: &A2aClientError) -> &'static str {
-    match e {
-        A2aClientError::ProtocolError(msg) if msg.contains("result") || msg.contains("task") => {
-            "a2a_no_task"
+    /// ДОБАВЛЕНО (ТЗ §2.5): различает "result нет / нет task" (a2a_no_task)
+    /// от прочих ошибок сервера/сети (a2a_remote_error по умолчанию).
+    /// Таблица §2.5 не покрывает явно все ветки A2aClientError — RemoteError,
+    /// MethodNotFound, ContextLost, Http используют a2a_remote_error как
+    /// разумный fallback-код для "прочих" ошибок.
+    fn send_error_to_a2a_code(e: &A2aClientError) -> &'static str {
+        match e {
+            A2aClientError::ProtocolError(msg)
+                if msg.contains("result") || msg.contains("task") =>
+            {
+                "a2a_no_task"
+            }
+            _ => "a2a_remote_error",
         }
-        _ => "a2a_remote_error",
     }
 }
 
@@ -457,18 +377,8 @@ impl AgentDriver for A2aClientDriver {
                             }
                         }
                         Err(e) => {
-                            // ИСПРАВЛЕНО (ТЗ §2.5): этот путь срабатывает и на
-                            // транспортных ошибках (Http), и на
-                            // A2aClientError::ProtocolError (когда нет
-                            // result/task в ответе), и на
-                            // MethodNotFound/ContextLost. ТЗ разделяет это на
-                            // два разных кода — a2a_remote_error (сервер
-                            // вернул error) и a2a_no_task (result есть, но
-                            // task в нём нет). Различаем их здесь по варианту
-                            // A2aClientError, а не сваливаем всё в один код,
-                            // как раньше.
                             let _ = tx.send(DriverEvent::Failed(PublicError {
-                                code: send_error_to_a2a_code(&e).into(),
+                                code: A2aClientDriver::send_error_to_a2a_code(&e).into(),
                                 message: e.to_string(),
                                 retryable: false,
                             })).await;
@@ -539,13 +449,9 @@ impl A2aClientDriver {
             // OnceCell не Clone напрямую при непустом значении в общем
             // случае, но здесь нужно ПЕРЕДАТЬ УЖЕ РЕЗОЛВЛЕННЫЙ wire в
             // спавненную задачу invoke() — не начинать новый зонд в клоне.
-            // Если auto_wire_cache уже инициализирован, копируем его
-            // содержимое в новый OnceCell; если нет — оставляем пустым
-            // (резолвится при первом execute() уже внутри клона).
             auto_wire_cache: {
                 let cloned = OnceCell::new();
                 if let Some(w) = self.auto_wire_cache.get() {
-                    // set() не может провалиться на свежем OnceCell.
                     let _ = cloned.set(w.clone());
                 }
                 cloned
@@ -557,47 +463,7 @@ impl A2aClientDriver {
 }
 
 #[cfg(test)]
-mod error_code_tests {
-    use crate::error::A2aClientError;
-    use crate::send_error_to_a2a_code;
-
-    #[test]
-    fn missing_result_maps_to_a2a_no_task() {
-        let e = A2aClientError::ProtocolError("missing 'result' in JSON-RPC response".into());
-        assert_eq!(send_error_to_a2a_code(&e), "a2a_no_task");
-    }
-
-    #[test]
-    fn missing_task_wrapper_maps_to_a2a_no_task() {
-        let e = A2aClientError::ProtocolError(
-            "sdk wire: expected 'result.task' wrapper, field missing".into(),
-        );
-        assert_eq!(send_error_to_a2a_code(&e), "a2a_no_task");
-    }
-
-    #[test]
-    fn remote_error_maps_to_a2a_remote_error() {
-        let e = A2aClientError::RemoteError {
-            code: -32000,
-            message: "boom".into(),
-        };
-        assert_eq!(send_error_to_a2a_code(&e), "a2a_remote_error");
-    }
-
-    #[test]
-    fn http_error_maps_to_a2a_remote_error_as_fallback() {
-        let e = A2aClientError::Http("connection refused".into());
-        assert_eq!(send_error_to_a2a_code(&e), "a2a_remote_error");
-    }
-}
-
-#[cfg(test)]
 mod auto_wire_lib_tests {
-    // Регрессия на реальную интеграцию: A2aClientDriver с wire_format: Auto
-    // должен успешно выполнить execute() через зонд, без явного wire в
-    // конфиге. Тест не имеет доступа к приватным полям — проверяет только
-    // наблюдаемое поведение через публичный invoke().
-
     use crate::{A2aClientConfig, A2aClientDriver, A2aWireFormat};
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -606,8 +472,6 @@ mod auto_wire_lib_tests {
     async fn auto_wire_format_resolves_and_completes_invoke() {
         let server = MockServer::start().await;
 
-        // Зонд (GetTask) -> "task not found" -> SDK распознан.
-        // Реальный invoke (SendMessage) -> Completed.
         Mock::given(method("POST"))
             .respond_with(|req: &wiremock::Request| {
                 let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
@@ -641,7 +505,6 @@ mod auto_wire_lib_tests {
             token: None,
             wire_format: A2aWireFormat::Auto,
             timeout_secs: 10,
-            agent_card_url: None,
         })
         .expect("driver builds even with Auto and no wire resolved yet");
 
@@ -651,133 +514,35 @@ mod auto_wire_lib_tests {
             .expect("invoke must resolve wire via probe and then complete");
         assert_eq!(task.id, "task-auto-1");
     }
-}
 
-#[cfg(test)]
-mod d3_and_d4_integration_tests {
-    use crate::{A2aClientConfig, A2aClientDriver, A2aWireFormat};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use wiremock::matchers::method;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    /// D3: закэшированный (ошибочно выбранный на первом резолве) wire не
-    /// должен навечно ломать драйвер — при MethodNotFound на реальном
-    /// вызове происходит once-off повторная попытка. Зонд сначала
-    /// "обманут" (первый GetTask отвечает "task not found" -> SDK
-    /// распознан), но реальный SendMessage на SDK-путь падает с
-    /// MethodNotFound, а spec-путь работает. При повторном резолве зонд
-    /// честно отвечает "method_not_found: GetTask" -> падает на spec ->
-    /// message/send завершается успехом.
-    #[tokio::test]
-    async fn auto_wire_recovers_once_from_wrong_initial_guess() {
-        let server = MockServer::start().await;
-        let sdk_probe_calls = Arc::new(AtomicUsize::new(0));
-
-        Mock::given(method("POST"))
-            .respond_with({
-                let calls = sdk_probe_calls.clone();
-                move |req: &wiremock::Request| {
-                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
-                let m = body
-                    .get("method")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                match m {
-                    "GetTask" => {
-                        let n = calls.fetch_add(1, Ordering::SeqCst);
-                        if n == 0 {
-                            // Первый зонд-вызов: SDK "подходит" (метод понят,
-                            // задачи нет — task not found). Это обман: реальный
-                            // SendMessage ниже вернёт MethodNotFound.
-                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                                "jsonrpc": "2.0", "id": 1,
-                                "error": { "code": -32001, "message": "task not found" }
-                            }))
-                        } else {
-                            // Повторный зонд после D3-retry: теперь честно
-                            // сообщаем, что GetTask не распознан -> fallback на spec.
-                            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                                "jsonrpc": "2.0", "id": 1,
-                                "error": { "code": -32000, "message": "method_not_found: GetTask" }
-                            }))
-                        }
-                    }
-                    "SendMessage" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "jsonrpc": "2.0", "id": 1,
-                        "error": { "code": -32601, "message": "Method not found" }
-                    })),
-                    "tasks/get" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "jsonrpc": "2.0", "id": 1,
-                        "error": { "code": -32001, "message": "task not found" }
-                    })),
-                    "message/send" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "jsonrpc": "2.0", "id": 1,
-                        "result": {
-                            "id": "task-recovered",
-                            "status": { "state": "completed" },
-                            "artifacts": [{ "parts": [{ "kind": "text", "text": "recovered via spec" }] }]
-                        }
-                    })),
-                    _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "jsonrpc": "2.0", "id": 1,
-                        "error": { "code": -32000, "message": "method_not_found: unexpected" }
-                    })),
-                }
-            }
-            })
-            .mount(&server)
-            .await;
-
-        let driver = A2aClientDriver::new(A2aClientConfig {
-            endpoint: server.uri(),
-            token: None,
-            wire_format: A2aWireFormat::Auto,
-            timeout_secs: 10,
-            agent_card_url: None,
-        })
-        .expect("driver builds");
-
-        let task = driver
-            .invoke("hello", None, None)
-            .await
-            .expect("must recover once and complete via spec after wrong initial guess");
-        assert_eq!(task.id, "task-recovered");
-        assert_eq!(sdk_probe_calls.load(Ordering::SeqCst), 2);
+    // ДОБАВЛЕНО (ТЗ §2.5): регрессия на новый маппинг кодов ошибок.
+    #[test]
+    fn send_error_to_a2a_code_maps_missing_result_to_no_task() {
+        use crate::error::A2aClientError;
+        let e = A2aClientError::ProtocolError("missing 'result' in JSON-RPC response".into());
+        assert_eq!(A2aClientDriver::send_error_to_a2a_code(&e), "a2a_no_task");
     }
 
-    /// D2/D4: agent_card_url задан и указывает на недоступный сервер —
-    /// resolve_auto_wire() должен не считать это фатальной ошибкой и
-    /// успешно упасть на зонд. detect_from_agent_card (D2) всегда
-    /// возвращает None, поэтому ошибка НЕ может прийти из карточки —
-    /// проверяем, что ошибка резолюции не утекла из card_url.
-    #[tokio::test]
-    async fn resolve_auto_wire_falls_through_to_probe_when_agent_card_configured_but_unreachable() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0", "id": 1,
-                "error": { "code": -32001, "message": "task not found" }
-            })))
-            .mount(&server)
-            .await;
+    #[test]
+    fn send_error_to_a2a_code_maps_missing_task_wrapper_to_no_task() {
+        use crate::error::A2aClientError;
+        let e = A2aClientError::ProtocolError(
+            "sdk wire: expected 'result.task' wrapper, field missing".into(),
+        );
+        assert_eq!(A2aClientDriver::send_error_to_a2a_code(&e), "a2a_no_task");
+    }
 
-        let driver = A2aClientDriver::new(A2aClientConfig {
-            endpoint: server.uri(),
-            token: None,
-            wire_format: A2aWireFormat::Auto,
-            timeout_secs: 10,
-            agent_card_url: Some("http://127.0.0.1:1/.well-known/agent.json".to_string()),
-        })
-        .expect("driver builds");
+    #[test]
+    fn send_error_to_a2a_code_maps_remote_error_to_remote_error() {
+        use crate::error::A2aClientError;
+        let e = A2aClientError::RemoteError { code: -32000, message: "boom".into() };
+        assert_eq!(A2aClientDriver::send_error_to_a2a_code(&e), "a2a_remote_error");
+    }
 
-        let result = driver.get_task("probe-check").await;
-        match result {
-            Ok(_) => {}
-            Err(e) => assert!(
-                !e.to_string().contains("127.0.0.1:1"),
-                "error must not leak the unreachable agent_card_url — resolution should have fallen through to probe: {e}"
-            ),
-        }
+    #[test]
+    fn send_error_to_a2a_code_maps_http_error_to_remote_error_fallback() {
+        use crate::error::A2aClientError;
+        let e = A2aClientError::Http("connection refused".into());
+        assert_eq!(A2aClientDriver::send_error_to_a2a_code(&e), "a2a_remote_error");
     }
 }
