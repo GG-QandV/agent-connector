@@ -1,6 +1,10 @@
 # ТЗ: адаптация driver-a2a-client под управление двумя wire-форматами A2A
 
-- **Статус:** Черновик ТЗ (на утверждение владельца). Код не меняется.
+> **ЗАМЕНЕНО:** объединено в единое ТЗ
+> `ACP-A2A_gateway/docs/TZ-a2a-dialects-gateway-adapter.md` → Раздел 2. Этот файл
+> сохранён как исходник, правки — в объединённом документе.
+
+- **Статус:** заменено (см. выше). Код не менялся.
 - **Дата:** 2026-08-17
 - **Затрагивает:** `crates/driver-a2a-client` (только этот crate); `adapterd-config`
   (`A2aClient` вариант — одно новое поле). Не затрагивает `adapter-core`,
@@ -23,9 +27,9 @@ lowercase-состояния), который драйвер не понимае
 Официальный SDK `a2a-rs` сам предоставляет **два** wire-представления, и они
 различаются:
 
-| Слой SDK | Wire | Источник |
-|---|---|---|
-| REST | путь `/message:send` | `a2a-client/src/rest.rs:17` (`REST_SEND_MESSAGE_PATH`) |
+| Слой SDK | Wire                             | Источник                                                                                                                                 |
+| -------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| REST     | путь `/message:send`             | `a2a-client/src/rest.rs:17` (`REST_SEND_MESSAGE_PATH`)                                                                                   |
 | JSON-RPC | метод `SendMessage` + proto-поля | `a2a/src/jsonrpc.rs:138` (`methods::SEND_MESSAGE`) + `a2a-server/src/jsonrpc.rs:73` (`protojson_conv::from_value::<SendMessageRequest>`) |
 
 Шлюз `ACP-A2A_gateway` реализует третий вид — **семантический** JSON-RPC по
@@ -34,6 +38,7 @@ A2A-спеке (метод `message/send`):
 `protocol/src/a2a.rs` (`SendMessageParams { message }`).
 
 Итог: **три** wire-вида, из них два релевантны для драйвера:
+
 1. **A2aSdkJsonRpc** — метод `SendMessage`, proto-поля (`TASK_STATE_*`, `{text}`,
    `ROLE_USER`). Это формат нашего `protocol-a2a-server` (собран на том же SDK).
 2. **A2aSpecJsonRpc** — метод `message/send`, семантические поля
@@ -56,10 +61,10 @@ A2A-спеке (метод `message/send`):
 
 ### 3.1 Метод запроса
 
-| | SDK-формат | Spec-формат |
-|---|---|---|
-| JSON-RPC method | `"SendMessage"` | `"message/send"` |
-| Источник | `a2a/src/jsonrpc.rs:138` | `ACP-A2A_gateway/gatewayd/src/transport_http.rs:254` |
+|                 | SDK-формат               | Spec-формат                                          |
+| --------------- | ------------------------ | ---------------------------------------------------- |
+| JSON-RPC method | `"SendMessage"`          | `"message/send"`                                     |
+| Источник        | `a2a/src/jsonrpc.rs:138` | `ACP-A2A_gateway/gatewayd/src/transport_http.rs:254` |
 
 > **Почему нельзя «угадать» на отправку:** сервер принимает ровно одно имя
 > метода. `SendMessage` → наш adapterd; `message/send` → шлюз. Неверный выбор =
@@ -71,12 +76,12 @@ A2A-спеке (метод `message/send`):
 Обе стороны принимают объект `{ message: { role, parts } }` на верхнем уровне.
 Различие — внутри `part` и `role`:
 
-| Поле | SDK-формат | Spec-формат |
-|---|---|---|
-| `role` | `"ROLE_USER"` | `"user"` |
-| part text | `{ "text": "..." }` | `{ "kind": "text", "text": "..." }` |
-| part resource | `{ "url": ..., "media_type": ... }`? | `{ "kind": "resource", "uri": ..., "mimeType": ... }` |
-| Источник | protojson (SDK десериализация: `unknown field \`kind\`` на `{kind}` — живой тест) | `protocol/src/a2a.rs` (`Message`, `Part` с `kind`) |
+| Поле          | SDK-формат                                                                        | Spec-формат                                           |
+| ------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `role`        | `"ROLE_USER"`                                                                     | `"user"`                                              |
+| part text     | `{ "text": "..." }`                                                               | `{ "kind": "text", "text": "..." }`                   |
+| part resource | `{ "url": ..., "media_type": ... }`?                                              | `{ "kind": "resource", "uri": ..., "mimeType": ... }` |
+| Источник      | protojson (SDK десериализация: `unknown field \`kind\`` на `{kind}` — живой тест) | `protocol/src/a2a.rs` (`Message`, `Part` с `kind`)    |
 
 > Живое подтверждение несовместимости SDK-стороны: наш adapterd на part
 > `{ "kind": "text" }` вернул `-32700 PARSE_ERROR: unknown field \`kind\``.
@@ -84,13 +89,13 @@ A2A-спеке (метод `message/send`):
 
 ### 3.3 Ответ `SendMessageResponse` / Task
 
-| Аспект | SDK-формат | Spec-формат |
-|---|---|---|
-| Обёртка | `{ "task": { ... } }` | плоский `{ id, context_id, status, ... }` |
-| Состояние | `"TASK_STATE_COMPLETED"` | `"completed"` |
-| message.role | `"ROLE_AGENT"` | `"agent"` |
-| part | `{ "text": ... }` | `{ "kind": "text", "text": ... }` |
-| Источник | `a2a/src/types.rs` (`TaskState` serde: `TASK_STATE_*`) | `transport_http.rs` (плоский Task) |
+| Аспект       | SDK-формат                                             | Spec-формат                               |
+| ------------ | ------------------------------------------------------ | ----------------------------------------- |
+| Обёртка      | `{ "task": { ... } }`                                  | плоский `{ id, context_id, status, ... }` |
+| Состояние    | `"TASK_STATE_COMPLETED"`                               | `"completed"`                             |
+| message.role | `"ROLE_AGENT"`                                         | `"agent"`                                 |
+| part         | `{ "text": ... }`                                      | `{ "kind": "text", "text": ... }`         |
+| Источник     | `a2a/src/types.rs` (`TaskState` serde: `TASK_STATE_*`) | `transport_http.rs` (плоский Task)        |
 
 > Живое подтверждение: драйвер (ищет `result.task`) получил от шлюза плоский
 > Task в `result` → ошибка `A2A response missing task: no task in result`.
@@ -194,11 +199,11 @@ struct NormalizedTask {
 
 ## 5. Маппинг ошибок
 
-| Ситуация | Результат |
-|---|---|
-| сервер вернул `error` (JSON-RPC) | `DriverEvent::Failed` c кодом `a2a_remote_error` |
-| `result` нет / нет task | `DriverEvent::Failed` `a2a_no_task` |
-| неподдерживаемый wire (будущие форматы) | ошибка в `new()`, агент не стартует |
+| Ситуация                                                                   | Результат                                                                          |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| сервер вернул `error` (JSON-RPC)                                           | `DriverEvent::Failed` c кодом `a2a_remote_error`                                   |
+| `result` нет / нет task                                                    | `DriverEvent::Failed` `a2a_no_task`                                                |
+| неподдерживаемый wire (будущие форматы)                                    | ошибка в `new()`, агент не стартует                                                |
 | несовпадение формата (отправлен `SendMessage`, сервер ждал `message/send`) | `-32601 METHOD_NOT_FOUND` → `DriverEvent::Failed`; в логе — hint про `wire_format` |
 
 ---

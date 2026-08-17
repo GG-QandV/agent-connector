@@ -33,3 +33,19 @@ Mappers реализованы (semantic DTO ↔ Core). **Wire-слои не р�
 A2A HTTP JSON-RPC/SSE server и ACP stdio JSON-RPC loop — следующие задачи
 (см. `operations.md` TODO). Mappers спроектированы так, чтобы SDK-обновление
 меняло только тонкую boundary-прослойку, не Core/stores/drivers.
+
+## Стратегия диалектов A2A (2026)
+
+Протокольная стратегия обоих продуктов (шлюз + адаптер) зафиксирована в
+`docs/A2A-protocol-strategy-2026.md` (версии EN/UK/RU — рядом, `.summary.md` —
+краткие резюме; единое ТЗ — `docs/TZ-a2a-dialects-gateway-adapter.md`):
+
+1. **База — A2A SDK (v1.0, ProtoJSON):** `SendMessage`/`GetTask`/`CancelTask`.
+2. **Fallback — A2A Spec (pre-1.0):** `message/send`/`tasks/get` — совместимость
+   со старыми клиентами (Python `a2a-sdk` и др.).
+3. **Deep fallback — ACP:** только унаследованные инсталляции, без развития.
+4. **ANP (W3C DID)** — отдельная ниша, вне scope.
+
+Влияние на wire-слои адаптера: `driver-a2a-client` получает `wire_format: auto`
+(диалект-зонд + кэш на эндпоинт, приоритет SDK); `protocol-a2a-server` — приём
+Spec на входе. Детали и DoD — в §9.2 документа стратегии.
