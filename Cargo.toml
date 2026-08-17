@@ -9,12 +9,14 @@ members = [
     "crates/driver-stdio",
     "crates/driver-http-sse",
     "crates/driver-mcp",
+    "crates/driver-a2a-client",
+    "crates/driver-acp-client",
     "crates/memory-task-store",
     "crates/sqlite-task-store-adapter",
     "crates/postgres-task-store-adapter",
     "crates/protocol-a2a-server",
     "crates/protocol-acp-runtime",
-    "crates/adapterd", "crates/adapterctl",
+    "crates/adapterd", "crates/adapterctl", "crates/driver-a2a-client", "crates/driver-acp-client",
 ]
 
 [workspace.package]
@@ -73,6 +75,8 @@ protocol-acp-runtime = { path = "crates/protocol-acp-runtime" }
 driver-stdio = { path = "crates/driver-stdio" }
 driver-http-sse = { path = "crates/driver-http-sse" }
 driver-mcp = { path = "crates/driver-mcp" }
+driver-a2a-client = { path = "crates/driver-a2a-client" }
+driver-acp-client = { path = "crates/driver-acp-client" }
 memory-task-store = { path = "crates/memory-task-store" }
 sqlite-task-store-adapter = { path = "crates/sqlite-task-store-adapter" }
 postgres-task-store-adapter = { path = "crates/postgres-task-store-adapter" }

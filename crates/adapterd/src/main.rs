@@ -13,7 +13,11 @@ use adapter_core::{
     TokenGrant,
 };
 use adapter_store_contract::TaskStore;
-use config::{AgentTransportConfig, AuthConfig, Config, McpTransportConfig, StorageConfig};
+use config::{
+    A2aWireFormat, AgentTransportConfig, AuthConfig, Config, McpTransportConfig, StorageConfig,
+};
+use driver_a2a_client::{A2aClientConfig, A2aClientDriver, A2aWireFormat as DriverA2aWireFormat};
+use driver_acp_client::{AcpClientConfig, AcpClientDriver};
 use driver_http_sse::{Credential, HttpSseDriver, HttpSseDriverConfig};
 use driver_mcp::{McpDriver, McpDriverError, McpHttpConfig, McpStdioConfig};
 use driver_stdio::{StdioDriver, StdioDriverConfig};
@@ -397,6 +401,59 @@ async fn build_driver(
                     agent.id, discovery_timeout_seconds
                 ))),
             }
+        }
+        AgentTransportConfig::A2aClient {
+            endpoint,
+            token_env,
+            allow_http_development,
+            request_timeout_seconds,
+            wire_format,
+            agent_card_url,
+        } => {
+            let url = Url::parse(endpoint).map_err(|e| {
+                StartupError::Driver(format!("invalid A2A endpoint for {}: {e}", agent.id))
+            })?;
+            if !*allow_http_development && url.scheme() != "https" {
+                return Err(StartupError::Driver(format!(
+                    "agent {} A2A client endpoint must use https",
+                    agent.id
+                )));
+            }
+            let token = match token_env {
+                Some(name) => {
+                    Some(env::var(name).map_err(|_| StartupError::MissingEnv(name.clone()))?)
+                }
+                None => None,
+            };
+            let config = A2aClientConfig {
+                endpoint: url.to_string(),
+                token,
+                wire_format: match wire_format {
+                    A2aWireFormat::Sdk => DriverA2aWireFormat::Sdk,
+                    A2aWireFormat::Spec => DriverA2aWireFormat::Spec,
+                    A2aWireFormat::Auto => DriverA2aWireFormat::Auto,
+                },
+                timeout_secs: *request_timeout_seconds,
+                agent_card_url: agent_card_url.clone(),
+            };
+            let driver =
+                A2aClientDriver::new(config).map_err(|e| StartupError::Driver(e.to_string()))?;
+            Ok(Arc::new(driver))
+        }
+        AgentTransportConfig::AcpClient {
+            command,
+            args,
+            working_dir,
+        } => {
+            let config = AcpClientConfig {
+                command: command.clone(),
+                args: args.clone(),
+                working_dir: working_dir.clone(),
+            };
+            let driver = AcpClientDriver::spawn(agent.id.clone(), config)
+                .await
+                .map_err(|e| StartupError::Driver(e.to_string()))?;
+            Ok(Arc::new(driver))
         }
     }
 }

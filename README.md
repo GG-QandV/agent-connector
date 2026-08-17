@@ -73,6 +73,17 @@ spawn'нутой задачи, снаружи передаётся только 
 Краткая вводная: `docs/architecture.md`. Эксплуатация: `docs/operations.md`.
 Совместимость протоколов: `docs/protocol-compatibility.md`.
 
+## A2A Protocol Strategy 2026
+
+Protocol-dialect strategy for the gateway and the adapter (A2A SDK v1.0 = base,
+Spec pre-1.0 = fallback, ACP = deep fallback, ANP — out of scope). Pick a
+language — each opens a short summary linking to the full strategy in that
+language:
+
+- **EN:** [A2A-protocol-strategy-2026-en.summary.md](docs/A2A-protocol-strategy-2026-en.summary.md)
+- **UA:** [A2A-protocol-strategy-2026-uk.summary.md](docs/A2A-protocol-strategy-2026-uk.summary.md)
+- **RU:** [A2A-protocol-strategy-2026-ru.summary.md](docs/A2A-protocol-strategy-2026-ru.summary.md)
+
 ## Status
 
 Версия **0.6.7**. Workspace, crates перенесены из плоского прототипа

@@ -195,6 +195,57 @@ pub enum AgentTransportConfig {
         #[serde(default = "default_mcp_discovery_timeout")]
         discovery_timeout_seconds: u64,
     },
+    /// A2A (HTTP JSON-RPC) клиент: adapterd вызывает внешний A2A-агент
+    /// (ADR-0003). Подходит для любого A2A-совместимого агента, включая
+    /// другой инстанс agent-connector или шлюз ACP-A2A.
+    A2aClient {
+        endpoint: String,
+        #[serde(default)]
+        token_env: Option<String>,
+        #[serde(default)]
+        allow_http_development: bool,
+        #[serde(default = "default_a2a_timeout_seconds")]
+        request_timeout_seconds: u64,
+        /// Диалект JSON-RPC: `sdk` (официальный a2a-rs SDK, по умолчанию)
+        /// или `spec` (семантический шлюз ACP-A2A_gateway).
+        #[serde(default)]
+        wire_format: A2aWireFormat,
+        /// URL Agent Card (обычно "<base>/.well-known/agent.json").
+        /// Используется при wire_format: auto — детект по protocolVersion
+        /// приоритетнее зонда (ТЗ §3.2 п.4).
+        #[serde(default)]
+        agent_card_url: Option<String>,
+    },
+    /// ACP (stdio JSON-RPC) клиент: adapterd спавнит внешний ACP-агент как
+    /// child-процесс (ADR-0003).
+    AcpClient {
+        command: PathBuf,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        working_dir: Option<PathBuf>,
+    },
+}
+
+fn default_a2a_timeout_seconds() -> u64 {
+    30
+}
+
+/// Диалект A2A JSON-RPC для driver-a2a-client.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum A2aWireFormat {
+    /// Официальный a2a-rs SDK JSON-RPC: SendMessage/GetTask/CancelTask,
+    /// proto-поля, обёртка {task: ...}. Совместим с protocol-a2a-server.
+    #[default]
+    Sdk,
+    /// Семантический шлюз ACP-A2A_gateway: message/send, плоский Task,
+    /// lowercase-состояния.
+    Spec,
+    /// Диалект неизвестен на момент конфигурации — определяется зондом
+    /// (dialect_probe) при первом контакте, результат кэшируется.
+    /// Приоритет при неоднозначности — Sdk (§3.4 ТЗ).
+    Auto,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -287,6 +338,20 @@ impl Config {
                 if matches!(self.mode, Mode::Remote) && allowed_tools.is_empty() {
                     return Err(ConfigError::Validation(format!(
                         "agent {} MCP driver requires allowed_tools in remote mode",
+                        agent.id
+                    )));
+                }
+            }
+            // A2A client endpoint: тот же https-check, что для HttpSse.
+            if let AgentTransportConfig::A2aClient {
+                endpoint,
+                allow_http_development,
+                ..
+            } = &agent.transport
+            {
+                if !*allow_http_development && !endpoint.starts_with("https://") {
+                    return Err(ConfigError::Validation(format!(
+                        "agent {} A2A client endpoint must use https",
                         agent.id
                     )));
                 }
