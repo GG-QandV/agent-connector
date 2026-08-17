@@ -125,8 +125,7 @@ pub fn from_jsonrpc_error(
     method: &str,
     wire_format: &'static str,
 ) -> A2aClientError {
-    let looks_like_unknown_method =
-        code == -32601 || message.contains(METHOD_NOT_FOUND_MARKER);
+    let looks_like_unknown_method = code == -32601 || message.contains(METHOD_NOT_FOUND_MARKER);
 
     if looks_like_unknown_method {
         return A2aClientError::MethodNotFound {
@@ -155,7 +154,13 @@ mod tests {
     #[test]
     fn code_32601_is_still_method_not_found() {
         let err = from_jsonrpc_error(-32601, "unknown agent_id: hermes", "SendMessage", "sdk");
-        assert!(matches!(err, A2aClientError::MethodNotFound { server_code: -32601, .. }));
+        assert!(matches!(
+            err,
+            A2aClientError::MethodNotFound {
+                server_code: -32601,
+                ..
+            }
+        ));
     }
 
     /// Регрессия, найденная по факту из реального кода шлюза: неизвестный
@@ -173,7 +178,11 @@ mod tests {
             "sdk",
         );
         match err {
-            A2aClientError::MethodNotFound { server_code, server_message, .. } => {
+            A2aClientError::MethodNotFound {
+                server_code,
+                server_message,
+                ..
+            } => {
                 assert_eq!(server_code, -32000);
                 assert!(server_message.contains("method_not_found"));
             }
@@ -188,8 +197,16 @@ mod tests {
     /// не только для несовпадения метода.
     #[test]
     fn code_32000_without_marker_stays_generic_remote_error() {
-        let err = from_jsonrpc_error(-32000, "agent process crashed unexpectedly", "SendMessage", "sdk");
-        assert!(matches!(err, A2aClientError::RemoteError { code: -32000, .. }));
+        let err = from_jsonrpc_error(
+            -32000,
+            "agent process crashed unexpectedly",
+            "SendMessage",
+            "sdk",
+        );
+        assert!(matches!(
+            err,
+            A2aClientError::RemoteError { code: -32000, .. }
+        ));
     }
 
     #[test]
@@ -200,7 +217,12 @@ mod tests {
 
     #[test]
     fn display_message_mentions_both_possible_codes() {
-        let err = from_jsonrpc_error(-32000, "method_not_found: SendMessage", "SendMessage", "spec");
+        let err = from_jsonrpc_error(
+            -32000,
+            "method_not_found: SendMessage",
+            "SendMessage",
+            "spec",
+        );
         let text = err.to_string();
         assert!(text.contains("wire_format=spec"));
         assert!(text.contains("-32601"));
