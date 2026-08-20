@@ -478,12 +478,33 @@ mod tests {
         }
     }
 
+    /// Expected identity for `task_peer` (did:anp:local:drv-a).
+    fn task_expected() -> anp_transport::PeerIdentity {
+        anp_transport::PeerIdentity {
+            did: "did:anp:local:drv-a".into(),
+            key_fingerprint: String::new(),
+        }
+    }
+
+    /// Expected identity for `messaging_peer` (did:anp:local:drv-b).
+    fn messaging_expected() -> anp_transport::PeerIdentity {
+        anp_transport::PeerIdentity {
+            did: "did:anp:local:drv-b".into(),
+            key_fingerprint: String::new(),
+        }
+    }
+
+    fn task_transport() -> FakeAnpTransport {
+        FakeAnpTransport::new([task_peer()], task_expected())
+    }
+
+    fn messaging_transport() -> FakeAnpTransport {
+        FakeAnpTransport::new([messaging_peer()], messaging_expected())
+    }
+
     #[tokio::test]
     async fn profile_selected_reaches_task_profile_ready() {
-        let driver = AnpClientDriver::new(
-            FakeAnpTransport::new([task_peer()]),
-            config("http://127.0.0.1:9910"),
-        );
+        let driver = AnpClientDriver::new(task_transport(), config("http://127.0.0.1:9910"));
         let state = driver.connect().await.unwrap();
         assert_eq!(state, AnpClientState::TaskProfileReady);
         assert_eq!(driver.state().await, AnpClientState::TaskProfileReady);
@@ -491,10 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_common_profile_falls_back_messaging_only() {
-        let driver = AnpClientDriver::new(
-            FakeAnpTransport::new([messaging_peer()]),
-            config("http://127.0.0.1:9911"),
-        );
+        let driver = AnpClientDriver::new(messaging_transport(), config("http://127.0.0.1:9911"));
         let state = driver.connect().await.unwrap();
         assert_eq!(state, AnpClientState::MessagingOnly);
         // Task commands are explicitly unsupported in MessagingOnly.
@@ -504,7 +522,7 @@ mod tests {
     #[tokio::test]
     async fn identity_failure_does_not_fall_back_to_insecure() {
         let driver = AnpClientDriver::new(
-            FakeAnpTransport::new([task_peer()]),
+            task_transport(),
             AnpClientConfig {
                 endpoint: "http://127.0.0.1:9910".into(),
                 expected_did: Some("did:anp:production".into()),
@@ -526,10 +544,7 @@ mod tests {
     async fn generic_peer_gives_no_false_task_capabilities() {
         // A peer that advertises only direct.send must NOT report task
         // capability via the driver's task-command path.
-        let driver = AnpClientDriver::new(
-            FakeAnpTransport::new([messaging_peer()]),
-            config("http://127.0.0.1:9911"),
-        );
+        let driver = AnpClientDriver::new(messaging_transport(), config("http://127.0.0.1:9911"));
         let _ = driver.connect().await;
         let r = driver
             .invoke(
@@ -551,30 +566,21 @@ mod tests {
 
     #[tokio::test]
     async fn task_ready_driver_reports_health_ok() {
-        let driver = AnpClientDriver::new(
-            FakeAnpTransport::new([task_peer()]),
-            config("http://127.0.0.1:9910"),
-        );
+        let driver = AnpClientDriver::new(task_transport(), config("http://127.0.0.1:9910"));
         let _ = driver.connect().await;
         assert!(driver.health().await.is_ok());
     }
 
     #[tokio::test]
     async fn messaging_only_driver_reports_unhealthy() {
-        let driver = AnpClientDriver::new(
-            FakeAnpTransport::new([messaging_peer()]),
-            config("http://127.0.0.1:9911"),
-        );
+        let driver = AnpClientDriver::new(messaging_transport(), config("http://127.0.0.1:9911"));
         let _ = driver.connect().await;
         assert!(driver.health().await.is_err());
     }
 
     #[tokio::test]
     async fn send_invoke_requires_task_profile() {
-        let driver = AnpClientDriver::new(
-            FakeAnpTransport::new([messaging_peer()]),
-            config("http://127.0.0.1:9911"),
-        );
+        let driver = AnpClientDriver::new(messaging_transport(), config("http://127.0.0.1:9911"));
         let _ = driver.connect().await;
         let r = driver
             .send_invoke(
@@ -616,6 +622,7 @@ mod tests {
         let transport = FakeAnpTransport::new_with_clock(
             [task_peer().with_negotiation_validity(chrono::Duration::minutes(5))],
             Arc::new(move || t0),
+            task_expected(),
         );
         // Driver clock is past the negotiated validity window.
         let later = Arc::new(move || t0 + chrono::Duration::minutes(6));
@@ -640,6 +647,7 @@ mod tests {
         let transport = FakeAnpTransport::new_with_clock(
             [task_peer().with_negotiation_validity(chrono::Duration::minutes(5))],
             Arc::new(move || t0),
+            task_expected(),
         );
         let clock = Arc::new(move || t0 + chrono::Duration::minutes(2));
         let driver = AnpClientDriver::with_clock(transport, config("http://127.0.0.1:9910"), clock);
@@ -661,6 +669,7 @@ mod tests {
         let transport = FakeAnpTransport::new_with_clock(
             [task_peer().with_negotiation_validity(chrono::Duration::minutes(5))],
             Arc::new(move || t0),
+            task_expected(),
         );
         let clock = Arc::new(move || t0 + chrono::Duration::minutes(6));
         let driver = AnpClientDriver::with_clock(transport, config("http://127.0.0.1:9910"), clock);
@@ -699,10 +708,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_from_task_profile_ready_allowed() {
-        let driver = AnpClientDriver::new(
-            FakeAnpTransport::new([task_peer()]),
-            config("http://127.0.0.1:9910"),
-        );
+        let driver = AnpClientDriver::new(task_transport(), config("http://127.0.0.1:9910"));
         assert_eq!(
             driver.connect().await.unwrap(),
             AnpClientState::TaskProfileReady
@@ -715,10 +721,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_from_messaging_only_allowed() {
-        let driver = AnpClientDriver::new(
-            FakeAnpTransport::new([messaging_peer()]),
-            config("http://127.0.0.1:9911"),
-        );
+        let driver = AnpClientDriver::new(messaging_transport(), config("http://127.0.0.1:9911"));
         assert_eq!(
             driver.connect().await.unwrap(),
             AnpClientState::MessagingOnly

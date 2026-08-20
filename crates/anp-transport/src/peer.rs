@@ -44,6 +44,34 @@ pub struct PeerIdentity {
     pub key_fingerprint: String,
 }
 
+impl PeerIdentity {
+    /// Whether this identity is fully empty (nothing configured).
+    pub fn is_empty(&self) -> bool {
+        self.did.trim().is_empty() && self.key_fingerprint.trim().is_empty()
+    }
+
+    /// Whether the identity matches against a configured expected identity.
+    ///
+    /// The expected identity is considered configured if it carries at least
+    /// one non-empty claim (DID or key fingerprint). Only the claims that are
+    /// explicitly configured are enforced; an empty expected identity matches
+    /// nothing (strict).
+    pub fn matches_expected(&self, expected: &PeerIdentity) -> bool {
+        if expected.is_empty() {
+            return false;
+        }
+        if !expected.did.trim().is_empty() && expected.did != self.did {
+            return false;
+        }
+        if !expected.key_fingerprint.trim().is_empty()
+            && expected.key_fingerprint != self.key_fingerprint
+        {
+            return false;
+        }
+        true
+    }
+}
+
 impl fmt::Display for PeerIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

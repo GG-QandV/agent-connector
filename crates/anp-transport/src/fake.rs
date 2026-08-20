@@ -67,6 +67,11 @@ type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 pub struct FakeAnpTransport {
     peers: Arc<HashMap<String, FakePeerSpec>>,
     clock: Clock,
+    /// Expected peer identity, enforced even for `InsecureDev`.
+    /// Per security policy §1, `InsecureDev` still requires an explicitly
+    /// configured expected identity (DID or key) — it only relaxes the
+    /// localhost/production restriction, not the identity requirement.
+    expected_identity: PeerIdentity,
 }
 
 impl std::fmt::Debug for FakeAnpTransport {
@@ -74,22 +79,37 @@ impl std::fmt::Debug for FakeAnpTransport {
         f.debug_struct("FakeAnpTransport")
             .field("peers", &self.peers)
             .field("clock", &"<fn>")
+            .field("expected_identity", &self.expected_identity)
             .finish()
     }
 }
 
 impl Default for FakeAnpTransport {
     fn default() -> Self {
-        Self::new_with_clock(std::iter::empty(), Arc::new(Utc::now))
+        Self::new_with_clock(
+            std::iter::empty(),
+            Arc::new(Utc::now),
+            PeerIdentity {
+                did: String::new(),
+                key_fingerprint: String::new(),
+            },
+        )
     }
 }
 
 impl FakeAnpTransport {
-    pub fn new(peers: impl IntoIterator<Item = FakePeerSpec>) -> Self {
-        Self::new_with_clock(peers, Arc::new(Utc::now))
+    pub fn new(
+        peers: impl IntoIterator<Item = FakePeerSpec>,
+        expected_identity: PeerIdentity,
+    ) -> Self {
+        Self::new_with_clock(peers, Arc::new(Utc::now), expected_identity)
     }
 
-    pub fn new_with_clock(peers: impl IntoIterator<Item = FakePeerSpec>, clock: Clock) -> Self {
+    pub fn new_with_clock(
+        peers: impl IntoIterator<Item = FakePeerSpec>,
+        clock: Clock,
+        expected_identity: PeerIdentity,
+    ) -> Self {
         let mut map = HashMap::new();
         for p in peers {
             map.insert(p.endpoint.clone(), p);
@@ -97,6 +117,7 @@ impl FakeAnpTransport {
         Self {
             peers: Arc::new(map),
             clock,
+            expected_identity,
         }
     }
 
@@ -107,6 +128,14 @@ impl FakeAnpTransport {
 
 fn fingerprint(did: &str) -> String {
     format!("fake-key:{}", did)
+}
+
+/// Identity a peer in the catalog presents for the given spec.
+fn presented_identity(spec: &FakePeerSpec) -> PeerIdentity {
+    PeerIdentity {
+        did: spec.did.clone(),
+        key_fingerprint: fingerprint(&spec.did),
+    }
 }
 
 #[async_trait]
@@ -134,11 +163,19 @@ impl AnpTransport for FakeAnpTransport {
             ));
         }
 
+        // Security policy §1: even InsecureDev requires an explicitly
+        // configured expected identity. The presented identity must match;
+        // an unconfigured/empty expected identity is a hard failure.
+        let presented = presented_identity(spec);
+        if !presented.matches_expected(&self.expected_identity) {
+            return Err(AnpError::IdentityVerificationFailed(format!(
+                "presented identity {} does not match configured expected identity {}",
+                presented.did, self.expected_identity.did
+            )));
+        }
+
         Ok(VerifiedAnpPeer {
-            identity: PeerIdentity {
-                did: spec.did.clone(),
-                key_fingerprint: fingerprint(&spec.did),
-            },
+            identity: presented,
             trust: TrustLevel::InsecureDev,
         })
     }
@@ -208,37 +245,48 @@ mod tests {
         FakePeerSpec::new("https://anp.example.com/peer", "did:anp:peer-c")
     }
 
+    /// Expected identity for `task_peer` (matches its did/key).
+    fn task_expected() -> PeerIdentity {
+        PeerIdentity {
+            did: "did:anp:local:peer-a".into(),
+            key_fingerprint: fingerprint("did:anp:local:peer-a"),
+        }
+    }
+
+    /// Expected identity for `messaging_peer`.
+    fn messaging_expected() -> PeerIdentity {
+        PeerIdentity {
+            did: "did:anp:local:peer-b".into(),
+            key_fingerprint: fingerprint("did:anp:local:peer-b"),
+        }
+    }
+
+    fn peer_ref(endpoint: &str) -> PeerRef {
+        PeerRef {
+            endpoint: endpoint.into(),
+            expected_did: None,
+            expected_key_fingerprint: None,
+        }
+    }
+
     #[tokio::test]
     async fn connect_localhost_succeeds_insecure_dev() {
-        let t = FakeAnpTransport::new([task_peer()]);
-        let p = t
-            .connect(PeerRef {
-                endpoint: "http://127.0.0.1:9901".into(),
-                expected_did: None,
-                expected_key_fingerprint: None,
-            })
-            .await
-            .unwrap();
+        let t = FakeAnpTransport::new([task_peer()], task_expected());
+        let p = t.connect(peer_ref("http://127.0.0.1:9901")).await.unwrap();
         assert_eq!(p.identity.did, "did:anp:local:peer-a");
         assert_eq!(p.trust, TrustLevel::InsecureDev);
     }
 
     #[tokio::test]
     async fn connect_remote_refuses_non_localhost() {
-        let t = FakeAnpTransport::new([remote_peer()]);
-        let r = t
-            .connect(PeerRef {
-                endpoint: "https://anp.example.com/peer".into(),
-                expected_did: None,
-                expected_key_fingerprint: None,
-            })
-            .await;
+        let t = FakeAnpTransport::new([remote_peer()], task_expected());
+        let r = t.connect(peer_ref("https://anp.example.com/peer")).await;
         assert!(r.is_err() && r.unwrap_err().is_identity_failure());
     }
 
     #[tokio::test]
     async fn connect_with_production_pin_fails_no_fallback() {
-        let t = FakeAnpTransport::new([task_peer()]);
+        let t = FakeAnpTransport::new([task_peer()], task_expected());
         let r = t
             .connect(PeerRef {
                 endpoint: "http://127.0.0.1:9901".into(),
@@ -250,16 +298,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insecure_dev_without_expected_identity_rejected() {
+        // Empty expected identity = nothing configured = hard failure.
+        let t = FakeAnpTransport::new(
+            [task_peer()],
+            PeerIdentity {
+                did: String::new(),
+                key_fingerprint: String::new(),
+            },
+        );
+        let r = t.connect(peer_ref("http://127.0.0.1:9901")).await;
+        assert!(r.is_err() && r.unwrap_err().is_identity_failure());
+    }
+
+    #[tokio::test]
+    async fn insecure_dev_mismatched_identity_rejected() {
+        // Expected identity for peer-b, but connecting to peer-a on localhost.
+        let t = FakeAnpTransport::new([task_peer()], messaging_expected());
+        let r = t.connect(peer_ref("http://127.0.0.1:9901")).await;
+        assert!(r.is_err() && r.unwrap_err().is_identity_failure());
+    }
+
+    #[tokio::test]
+    async fn insecure_dev_matched_identity_localhost_accepted() {
+        let t = FakeAnpTransport::new([task_peer()], task_expected());
+        let p = t.connect(peer_ref("http://127.0.0.1:9901")).await.unwrap();
+        assert_eq!(p.identity.did, "did:anp:local:peer-a");
+        assert_eq!(p.trust, TrustLevel::InsecureDev);
+    }
+
+    #[tokio::test]
+    async fn insecure_dev_matched_did_alone_accepted() {
+        // Expected identity configured by DID only; key not configured -> only
+        // DID is enforced.
+        let t = FakeAnpTransport::new(
+            [task_peer()],
+            PeerIdentity {
+                did: "did:anp:local:peer-a".into(),
+                key_fingerprint: String::new(),
+            },
+        );
+        let p = t.connect(peer_ref("http://127.0.0.1:9901")).await.unwrap();
+        assert_eq!(p.identity.did, "did:anp:local:peer-a");
+    }
+
+    #[tokio::test]
+    async fn insecure_dev_mismatched_did_rejected_even_with_matching_key() {
+        // Key matches but DID does not -> reject.
+        let t = FakeAnpTransport::new(
+            [task_peer()],
+            PeerIdentity {
+                did: "did:anp:local:other".into(),
+                key_fingerprint: fingerprint("did:anp:local:peer-a"),
+            },
+        );
+        let r = t.connect(peer_ref("http://127.0.0.1:9901")).await;
+        assert!(r.is_err() && r.unwrap_err().is_identity_failure());
+    }
+
+    #[tokio::test]
     async fn negotiate_selects_task_profile() {
-        let t = FakeAnpTransport::new([task_peer()]);
-        let peer = t
-            .connect(PeerRef {
-                endpoint: "http://127.0.0.1:9901".into(),
-                expected_did: None,
-                expected_key_fingerprint: None,
-            })
-            .await
-            .unwrap();
+        let t = FakeAnpTransport::new([task_peer()], task_expected());
+        let peer = t.connect(peer_ref("http://127.0.0.1:9901")).await.unwrap();
         let caps = t.capabilities(&peer).await.unwrap();
         assert!(caps.contains("agent-connector.anp-task.v1"));
 
@@ -282,15 +382,9 @@ mod tests {
     async fn negotiation_result_expires() {
         use chrono::TimeZone;
         let t0 = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let t = FakeAnpTransport::new_with_clock([task_peer()], Arc::new(move || t0));
-        let peer = t
-            .connect(PeerRef {
-                endpoint: "http://127.0.0.1:9901".into(),
-                expected_did: None,
-                expected_key_fingerprint: None,
-            })
-            .await
-            .unwrap();
+        let t =
+            FakeAnpTransport::new_with_clock([task_peer()], Arc::new(move || t0), task_expected());
+        let peer = t.connect(peer_ref("http://127.0.0.1:9901")).await.unwrap();
         let n = t
             .negotiate(
                 &peer,
@@ -306,15 +400,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_common_profile_falls_back_messaging_only() {
-        let t = FakeAnpTransport::new([messaging_peer()]);
-        let peer = t
-            .connect(PeerRef {
-                endpoint: "http://127.0.0.1:9902".into(),
-                expected_did: None,
-                expected_key_fingerprint: None,
-            })
-            .await
-            .unwrap();
+        let t = FakeAnpTransport::new([messaging_peer()], messaging_expected());
+        let peer = t.connect(peer_ref("http://127.0.0.1:9902")).await.unwrap();
         let r = t
             .negotiate(
                 &peer,
@@ -328,15 +415,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_accepts_from_verified_peer() {
-        let t = FakeAnpTransport::new([task_peer()]);
-        let peer = t
-            .connect(PeerRef {
-                endpoint: "http://127.0.0.1:9901".into(),
-                expected_did: None,
-                expected_key_fingerprint: None,
-            })
-            .await
-            .unwrap();
+        let t = FakeAnpTransport::new([task_peer()], task_expected());
+        let peer = t.connect(peer_ref("http://127.0.0.1:9901")).await.unwrap();
         let acc = t
             .send(
                 &peer,
