@@ -22,7 +22,8 @@ pub use error::{AnpError, AnpResult};
 pub use fake::{FakeAnpTransport, FakePeerSpec};
 pub use message::{AnpAccepted, AnpMessage, AnpMessageBody, AnpMessageId};
 pub use negotiation::{
-    profile_selection, NegotiatedProfile, NegotiationStatus, ProfileOffer, SelectedProfile,
+    build_negotiated, negotiate_deterministic, profile_selection, NegotiatedProfile,
+    ProfileCapabilities, ProfileOffer,
 };
 pub use peer::{PeerIdentity, PeerRef, TrustLevel, VerifiedAnpPeer};
 pub use transport::AnpTransport;

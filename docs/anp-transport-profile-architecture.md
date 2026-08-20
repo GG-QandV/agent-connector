@@ -30,11 +30,15 @@ ANP transport/security
 AnpTransport::connect(peer)
   → VerifiedAnpPeer
   → negotiate(["agent-connector.anp-task.v1", ...])
-  → SelectedProfile
+  → NegotiatedProfile (profile_id, capabilities, negotiation_id, valid_until)
      ├── agent-connector.anp-task.v1 → full AgentDriver
      ├── known external profile       → dedicated mapper/adapter
      └── no common task profile       → generic direct.send messaging only
 ```
+
+A negotiation result is time-bounded (`valid_until`, mirroring ANP
+`negotiationId`/`validUntil`). Task operations are rejected once the result
+expires and a renegotiation is required.
 
 ## Profile selection policy
 

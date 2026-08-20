@@ -16,12 +16,13 @@ use adapter_core::{AgentDriver, CoreError, DriverCapabilities, DriverEvent, Invo
 use adapter_model::{PublicError, TaskId};
 use anp_transport::{
     AnpCapabilities, AnpError, AnpMessage, AnpMessageBody, AnpMessageId, AnpTransport,
-    NegotiationStatus, PeerRef, ProfileOffer, VerifiedAnpPeer,
+    NegotiatedProfile, PeerRef, ProfileOffer, VerifiedAnpPeer,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 use protocol_anp_profile::{
-    MessageId, OperationId, ProfileError, TaskCancel, TaskEvent, TaskId as AnpTaskId, TaskInvoke,
-    PROFILE_ID,
+    MessageEnvelope, MessageId, OperationId, ProfileError, TaskCancel, TaskEvent,
+    TaskId as AnpTaskId, TaskInvoke, PROFILE_ID,
 };
 use tokio::sync::{mpsc, RwLock};
 use tracing::warn;
@@ -39,6 +40,13 @@ pub enum AnpClientError {
     Profile(#[from] ProfileError),
     #[error("task command requires `{PROFILE_ID}` profile; current state is {state}")]
     UnsupportedCapability { state: AnpClientState },
+    #[error(
+        "negotiated profile `{profile_id}` expired (valid_until {valid_until}); renegotiation required"
+    )]
+    NegotiationExpired {
+        profile_id: String,
+        valid_until: chrono::DateTime<Utc>,
+    },
     #[error("illegal state transition {from} -> {to}")]
     IllegalState {
         from: AnpClientState,
@@ -70,12 +78,22 @@ pub struct AnpClientDriver<T: AnpTransport> {
     state: RwLock<AnpClientState>,
     peer: RwLock<Option<VerifiedAnpPeer>>,
     capabilities: RwLock<Option<AnpCapabilities>>,
+    negotiated: RwLock<Option<NegotiatedProfile>>,
     remote_task_ids: Arc<RwLock<HashMap<TaskId, AnpTaskId>>>,
     id: String,
+    clock: Arc<dyn Fn() -> chrono::DateTime<Utc> + Send + Sync>,
 }
 
 impl<T: AnpTransport> AnpClientDriver<T> {
     pub fn new(transport: T, config: AnpClientConfig) -> Self {
+        Self::with_clock(transport, config, Arc::new(Utc::now))
+    }
+
+    pub fn with_clock(
+        transport: T,
+        config: AnpClientConfig,
+        clock: Arc<dyn Fn() -> chrono::DateTime<Utc> + Send + Sync>,
+    ) -> Self {
         let id = format!("anp:{}", config.endpoint);
         Self {
             transport,
@@ -83,8 +101,10 @@ impl<T: AnpTransport> AnpClientDriver<T> {
             state: RwLock::new(AnpClientState::Disconnected),
             peer: RwLock::new(None),
             capabilities: RwLock::new(None),
+            negotiated: RwLock::new(None),
             remote_task_ids: Arc::new(RwLock::new(HashMap::new())),
             id,
+            clock,
         }
     }
 
@@ -92,10 +112,23 @@ impl<T: AnpTransport> AnpClientDriver<T> {
         *self.state.read().await
     }
 
+    /// Consumes the driver and returns the underlying transport (tests).
+    pub fn into_inner_transport(self) -> T {
+        self.transport
+    }
+
+    /// The currently negotiated profile, if any.
+    pub async fn negotiated_profile(&self) -> Option<NegotiatedProfile> {
+        self.negotiated.read().await.clone()
+    }
+
     /// Connects, verifies identity and negotiates the task profile.
     ///
     /// Follows the handoff state machine. On no-common-profile the driver
     /// ends in `MessagingOnly` and task commands fail explicitly.
+    ///
+    /// May be called again from an active session (`TaskProfileReady` or
+    /// `MessagingOnly`) to reconnect/renegotiate.
     pub async fn connect(&self) -> Result<AnpClientState, AnpClientError> {
         self.apply_transition(AnpClientState::Connecting).await?;
 
@@ -126,16 +159,14 @@ impl<T: AnpTransport> AnpClientDriver<T> {
             profiles: vec![PROFILE_ID.to_string()],
         };
         match self.transport.negotiate(&peer, offer).await {
-            Ok(n) if n.status == NegotiationStatus::Accepted => {
+            Ok(n) => {
+                *self.negotiated.write().await = Some(n);
                 self.apply_transition(AnpClientState::TaskProfileReady)
                     .await?;
                 Ok(AnpClientState::TaskProfileReady)
             }
-            Ok(_) => {
-                self.apply_transition(AnpClientState::MessagingOnly).await?;
-                Ok(AnpClientState::MessagingOnly)
-            }
             Err(AnpError::NoCommonProfile { .. }) => {
+                *self.negotiated.write().await = None;
                 self.apply_transition(AnpClientState::MessagingOnly).await?;
                 Ok(AnpClientState::MessagingOnly)
             }
@@ -158,6 +189,21 @@ impl<T: AnpTransport> AnpClientDriver<T> {
         let state = *self.state.read().await;
         if !state.allows_task_commands() {
             return Err(AnpClientError::UnsupportedCapability { state });
+        }
+        // A negotiated profile must be present and still valid. An expired
+        // negotiation result blocks task operations until renegotiation.
+        let negotiated = self
+            .negotiated
+            .read()
+            .await
+            .clone()
+            .ok_or(AnpClientError::UnsupportedCapability { state })?;
+        let now = (self.clock)();
+        if negotiated.is_expired(now) {
+            return Err(AnpClientError::NegotiationExpired {
+                profile_id: negotiated.profile_id.clone(),
+                valid_until: negotiated.valid_until,
+            });
         }
         Ok(())
     }
@@ -184,9 +230,11 @@ impl<T: AnpTransport> AnpClientDriver<T> {
             message_id: AnpMessageId(message_id.0.clone()),
             kind: "task.invoke".into(),
             body: AnpMessageBody::Json(serde_json::to_string(&TaskInvoke {
-                task_id: anp_task_id.clone(),
-                operation_id,
-                message_id: message_id.clone(),
+                envelope: MessageEnvelope::new(
+                    anp_task_id.clone(),
+                    operation_id,
+                    message_id.clone(),
+                ),
                 agent: self.config.local_agent.clone(),
                 payload,
             })?),
@@ -208,9 +256,8 @@ impl<T: AnpTransport> AnpClientDriver<T> {
             message_id: AnpMessageId(message_id.0.clone()),
             kind: "task.cancel".into(),
             body: AnpMessageBody::Json(serde_json::to_string(&TaskCancel {
-                task_id: anp_task_id,
-                operation_id,
-                message_id: message_id.clone(),
+                envelope: MessageEnvelope::new(anp_task_id, operation_id, message_id.clone()),
+                payload: serde_json::json!({}),
             })?),
         };
         self.transport.send(&peer, msg).await?;
@@ -224,12 +271,13 @@ impl<T: AnpTransport> AnpClientDriver<T> {
 
     /// Translates an inbound `TaskEvent` into a core `DriverEvent`.
     ///
-    /// `None` for `Accepted` (no consumer-facing progress).
+    /// `None` for `Accepted` (no consumer-facing progress) and for outbound
+    /// operation types (invoke/cancel/get_status/events).
     pub fn translate_event(ev: &TaskEvent) -> Option<DriverEvent> {
         use protocol_anp_profile::TaskState;
         match ev {
-            TaskEvent::Accepted(_) => None,
-            TaskEvent::Status(e) => match e.state {
+            TaskEvent::TaskAccepted(_) => None,
+            TaskEvent::TaskStatus(e) => match e.state {
                 TaskState::Completed => Some(DriverEvent::Completed(vec![])),
                 TaskState::Failed => Some(DriverEvent::Failed(PublicError {
                     code: "anp.task_failed".into(),
@@ -238,13 +286,13 @@ impl<T: AnpTransport> AnpClientDriver<T> {
                 })),
                 TaskState::Cancelled => Some(DriverEvent::Cancelled),
             },
-            TaskEvent::InputRequired(e) => {
+            TaskEvent::TaskInputRequired(e) => {
                 Some(DriverEvent::InputRequired(adapter_model::InputRequest {
                     question: e.prompt.clone(),
                     schema: None,
                 }))
             }
-            TaskEvent::Progress(e) => Some(DriverEvent::Progress {
+            TaskEvent::TaskProgress(e) => Some(DriverEvent::Progress {
                 message: e
                     .payload
                     .get("message")
@@ -253,7 +301,7 @@ impl<T: AnpTransport> AnpClientDriver<T> {
                     .to_string(),
                 percent: None,
             }),
-            TaskEvent::Artifact(e) => Some(DriverEvent::Artifact(adapter_model::ArtifactRef {
+            TaskEvent::TaskArtifact(e) => Some(DriverEvent::Artifact(adapter_model::ArtifactRef {
                 id: e.artifact.uri.clone(),
                 name: e
                     .artifact
@@ -270,7 +318,7 @@ impl<T: AnpTransport> AnpClientDriver<T> {
                 size_bytes: 0,
                 uri: Some(e.artifact.uri.clone()),
             })),
-            TaskEvent::Completed(e) => Some(DriverEvent::Completed(
+            TaskEvent::TaskCompleted(e) => Some(DriverEvent::Completed(
                 e.artifacts
                     .iter()
                     .map(|a| Part::FileRef {
@@ -279,12 +327,17 @@ impl<T: AnpTransport> AnpClientDriver<T> {
                     })
                     .collect(),
             )),
-            TaskEvent::Failed(e) => Some(DriverEvent::Failed(PublicError {
+            TaskEvent::TaskFailed(e) => Some(DriverEvent::Failed(PublicError {
                 code: "anp.task_failed".into(),
                 message: e.error.clone(),
                 retryable: false,
             })),
-            TaskEvent::Cancelled(_) => Some(DriverEvent::Cancelled),
+            TaskEvent::TaskCancelled(_) => Some(DriverEvent::Cancelled),
+            TaskEvent::TaskInvoke(_)
+            | TaskEvent::TaskCancel(_)
+            | TaskEvent::TaskGetStatus(_)
+            | TaskEvent::TaskEvents(_)
+            | TaskEvent::TaskProvideInput(_) => None,
         }
     }
 
@@ -538,15 +591,140 @@ mod tests {
 
     #[tokio::test]
     async fn translate_terminal_events() {
-        let ev = TaskEvent::Completed(protocol_anp_profile::TaskCompleted {
-            task_id: AnpTaskId("t".into()),
+        use protocol_anp_profile::{MessageEnvelope, OperationId as OpId};
+        let ev = TaskEvent::TaskCompleted(protocol_anp_profile::TaskCompleted {
+            envelope: MessageEnvelope::new(
+                AnpTaskId("t".into()),
+                OpId("op".into()),
+                MessageId("m".into()),
+            ),
             seq: 2,
-            message_id: MessageId("m".into()),
+            is_final: true,
             artifacts: vec![],
+            payload: serde_json::json!({}),
         });
         assert!(matches!(
             AnpClientDriver::<FakeAnpTransport>::translate_event(&ev),
             Some(DriverEvent::Completed(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn expired_negotiation_blocks_task_operations() {
+        use chrono::TimeZone;
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let transport = FakeAnpTransport::new_with_clock(
+            [task_peer().with_negotiation_validity(chrono::Duration::minutes(5))],
+            Arc::new(move || t0),
+        );
+        // Driver clock is past the negotiated validity window.
+        let later = Arc::new(move || t0 + chrono::Duration::minutes(6));
+        let driver = AnpClientDriver::with_clock(transport, config("http://127.0.0.1:9910"), later);
+        let state = driver.connect().await.unwrap();
+        assert_eq!(state, AnpClientState::TaskProfileReady);
+
+        let r = driver
+            .send_invoke(
+                AnpTaskId("t-1".into()),
+                OperationId("op-1".into()),
+                serde_json::json!({}),
+            )
+            .await;
+        assert!(matches!(r, Err(AnpClientError::NegotiationExpired { .. })));
+    }
+
+    #[tokio::test]
+    async fn valid_negotiation_allows_task_operations() {
+        use chrono::TimeZone;
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let transport = FakeAnpTransport::new_with_clock(
+            [task_peer().with_negotiation_validity(chrono::Duration::minutes(5))],
+            Arc::new(move || t0),
+        );
+        let clock = Arc::new(move || t0 + chrono::Duration::minutes(2));
+        let driver = AnpClientDriver::with_clock(transport, config("http://127.0.0.1:9910"), clock);
+        let _ = driver.connect().await;
+        let r = driver
+            .send_invoke(
+                AnpTaskId("t-1".into()),
+                OperationId("op-1".into()),
+                serde_json::json!({}),
+            )
+            .await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn renegotiation_after_expiry_restores_task_commands() {
+        use chrono::TimeZone;
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let transport = FakeAnpTransport::new_with_clock(
+            [task_peer().with_negotiation_validity(chrono::Duration::minutes(5))],
+            Arc::new(move || t0),
+        );
+        let clock = Arc::new(move || t0 + chrono::Duration::minutes(6));
+        let driver = AnpClientDriver::with_clock(transport, config("http://127.0.0.1:9910"), clock);
+
+        let _ = driver.connect().await;
+        let before = driver
+            .send_invoke(
+                AnpTaskId("t-1".into()),
+                OperationId("op-1".into()),
+                serde_json::json!({}),
+            )
+            .await;
+        assert!(matches!(
+            before,
+            Err(AnpClientError::NegotiationExpired { .. })
+        ));
+
+        // Reconnect for a new session, with the clock back inside the
+        // validity window granted by the (fresh) negotiation.
+        let fresh = Arc::new(move || t0 + chrono::Duration::minutes(1));
+        let driver2 = AnpClientDriver::with_clock(
+            driver.into_inner_transport(),
+            config("http://127.0.0.1:9910"),
+            fresh,
+        );
+        let _ = driver2.connect().await;
+        let after = driver2
+            .send_invoke(
+                AnpTaskId("t-2".into()),
+                OperationId("op-2".into()),
+                serde_json::json!({}),
+            )
+            .await;
+        assert!(after.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reconnect_from_task_profile_ready_allowed() {
+        let driver = AnpClientDriver::new(
+            FakeAnpTransport::new([task_peer()]),
+            config("http://127.0.0.1:9910"),
+        );
+        assert_eq!(
+            driver.connect().await.unwrap(),
+            AnpClientState::TaskProfileReady
+        );
+        // A new negotiated session via reconnect.
+        let state = driver.connect().await.unwrap();
+        assert_eq!(state, AnpClientState::TaskProfileReady);
+        assert!(driver.health().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reconnect_from_messaging_only_allowed() {
+        let driver = AnpClientDriver::new(
+            FakeAnpTransport::new([messaging_peer()]),
+            config("http://127.0.0.1:9911"),
+        );
+        assert_eq!(
+            driver.connect().await.unwrap(),
+            AnpClientState::MessagingOnly
+        );
+        let state = driver.connect().await.unwrap();
+        assert_eq!(state, AnpClientState::MessagingOnly);
+        assert!(driver.health().await.is_err());
     }
 }

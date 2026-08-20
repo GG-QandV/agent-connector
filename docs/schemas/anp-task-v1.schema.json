@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-connector.dev/schemas/anp-task-v1.schema.json",
+  "title": "agent-connector.anp-task.v1",
+  "description": "Canonical wire contract for the ANP embedded task profile. This schema is the source of truth; the Rust DTOs in protocol-anp-profile are aligned to it and must not diverge. Version 1.",
+  "type": "object",
+  "properties": {
+    "profile": {
+      "const": "agent-connector.anp-task.v1",
+      "description": "Profile identifier. Unknown profiles are rejected."
+    },
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Profile version. Incompatible versions are rejected."
+    },
+    "message_type": {
+      "type": "string",
+      "enum": [
+        "task.invoke",
+        "task.cancel",
+        "task.get_status",
+        "task.provide_input",
+        "task.accepted",
+        "task.status",
+        "task.input_required",
+        "task.progress",
+        "task.artifact",
+        "task.completed",
+        "task.failed",
+        "task.cancelled",
+        "task.events"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Remote (peer-scoped) task identifier. Local core TaskId remains canonical and is correlated via this field."
+    },
+    "remote_task_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Peer-assigned task id on inbound messages; mirrors task_id directionally."
+    },
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Idempotency key for invoke/cancel/provide_input operations."
+    },
+    "message_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique per-sender message identifier for dedup/ack."
+    },
+    "payload": {
+      "description": "Operation/event payload, message-type specific."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Strictly increasing event sequence; >= 1, no gaps, no duplicates."
+    },
+    "after_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Resume cursor: return events with seq > after_seq. 0 = full history."
+    },
+    "final": {
+      "type": "boolean",
+      "description": "Terminal events (completed/failed/cancelled) must set final=true. No event may follow a final event."
+    },
+    "agent": {
+      "type": "string",
+      "description": "Target agent name for task.invoke."
+    },
+    "input_request_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable id correlating task.input_required with task.provide_input."
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Prompt text for task.input_required."
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifact"
+      },
+      "description": "Artifacts produced on completion."
+    },
+    "artifact": {
+      "$ref": "#/$defs/artifact"
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message for task.failed."
+    },
+    "state": {
+      "type": "string",
+      "enum": ["completed", "failed", "cancelled"],
+      "description": "Terminal state carried by task.status."
+    },
+    "capabilities": {
+      "$ref": "#/$defs/capabilities",
+      "description": "Capability flags advertised/negotiated with the profile."
+    }
+  },
+  "required": ["profile", "version", "message_type", "task_id", "operation_id", "message_id", "payload"],
+  "allOf": [
+    {
+      "$ref": "#/$defs/rules/seq-required"
+    },
+    {
+      "$ref": "#/$defs/rules/after-seq-required"
+    },
+    {
+      "$ref": "#/$defs/rules/terminal-final"
+    },
+    {
+      "$ref": "#/$defs/rules/input-required"
+    },
+    {
+      "$ref": "#/$defs/rules/provide-input-request"
+    }
+  ],
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "properties": {
+        "uri": { "type": "string", "minLength": 1 },
+        "mime_type": { "type": "string" }
+      },
+      "required": ["uri"]
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "supports_resume": { "type": "boolean" },
+        "supports_cancel": { "type": "boolean" },
+        "supports_input": { "type": "boolean" }
+      }
+    },
+    "rules": {
+      "seq-required": {
+        "description": "Event types require seq.",
+        "if": {
+          "properties": {
+            "message_type": {
+              "enum": [
+                "task.status",
+                "task.input_required",
+                "task.progress",
+                "task.artifact",
+                "task.completed",
+                "task.failed",
+                "task.cancelled"
+              ]
+            }
+          },
+          "required": ["message_type"]
+        },
+        "then": { "required": ["seq"] }
+      },
+      "after-seq-required": {
+        "description": "task.events resume request requires after_seq.",
+        "if": {
+          "properties": { "message_type": { "const": "task.events" } },
+          "required": ["message_type"]
+        },
+        "then": { "required": ["after_seq"] }
+      },
+      "terminal-final": {
+        "description": "Terminal events must set final=true; non-terminal must not.",
+        "if": {
+          "properties": {
+            "message_type": {
+              "enum": ["task.completed", "task.failed", "task.cancelled"]
+            }
+          },
+          "required": ["message_type"]
+        },
+        "then": {
+          "properties": { "final": { "const": true } },
+          "required": ["final"]
+        },
+        "else": {
+          "properties": { "final": { "const": false } }
+        }
+      },
+      "input-required": {
+        "description": "task.input_required carries input_request_id and prompt.",
+        "if": {
+          "properties": { "message_type": { "const": "task.input_required" } },
+          "required": ["message_type"]
+        },
+        "then": { "required": ["input_request_id", "prompt"] }
+      },
+      "provide-input-request": {
+        "description": "task.provide_input carries input_request_id.",
+        "if": {
+          "properties": { "message_type": { "const": "task.provide_input" } },
+          "required": ["message_type"]
+        },
+        "then": { "required": ["input_request_id"] }
+      }
+    }
+  },
+  "additionalProperties": false
+}

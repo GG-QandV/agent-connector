@@ -27,8 +27,9 @@ pub trait AnpTransport: Send + Sync {
 
     /// Negotiate a profile from the local offer.
     ///
-    /// Returns [`crate::NegotiationStatus::NoCommonProfile`] when no local
-    /// profile is accepted — the caller then falls back to messaging-only.
+    /// Returns a usable [`NegotiatedProfile`] when the peer accepts a common
+    /// profile, or [`crate::AnpError::NoCommonProfile`] otherwise — the
+    /// caller then falls back to messaging-only.
     async fn negotiate(
         &self,
         peer: &VerifiedAnpPeer,

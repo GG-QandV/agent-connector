@@ -62,6 +62,13 @@ impl fmt::Display for AnpClientState {
 /// Valid state transitions.
 ///
 /// Returns `Err` (leaving the state unchanged) for illegal transitions.
+///
+/// Transport reconnect is allowed from any *active* session state
+/// (`TaskProfileReady`/`MessagingOnly`) back through `Connecting`. Terminal
+/// **task** states are not lifetime transport states: a terminal task cannot
+/// restart invocation, but the transport may reconnect for a new operation
+/// (see driver tests `terminal task cannot restart invocation` vs
+/// `transport can reconnect for a new negotiated session`).
 pub fn transition(from: AnpClientState, to: AnpClientState) -> Result<AnpClientState, String> {
     use AnpClientState::*;
     let legal = matches!(
@@ -75,6 +82,8 @@ pub fn transition(from: AnpClientState, to: AnpClientState) -> Result<AnpClientS
             | (Negotiating, TaskProfileReady)
             | (Negotiating, MessagingOnly)
             | (Negotiating, Failed)
+            | (TaskProfileReady, Connecting)
+            | (MessagingOnly, Connecting)
             | (TaskProfileReady, MessagingOnly)
             | (TaskProfileReady, Failed)
             | (MessagingOnly, Failed)
@@ -132,6 +141,51 @@ mod tests {
             transition(AnpClientState::Negotiating, AnpClientState::MessagingOnly).unwrap(),
             AnpClientState::MessagingOnly
         );
+    }
+
+    #[test]
+    fn active_sessions_can_reconnect() {
+        assert_eq!(
+            transition(AnpClientState::TaskProfileReady, AnpClientState::Connecting).unwrap(),
+            AnpClientState::Connecting
+        );
+        assert_eq!(
+            transition(AnpClientState::MessagingOnly, AnpClientState::Connecting).unwrap(),
+            AnpClientState::Connecting
+        );
+    }
+
+    #[test]
+    fn reconnect_cycle_profile_ready() {
+        let s = transition(AnpClientState::TaskProfileReady, AnpClientState::Connecting).unwrap();
+        let s = transition(s, AnpClientState::IdentityVerified).unwrap();
+        let s = transition(s, AnpClientState::Negotiating).unwrap();
+        assert_eq!(
+            transition(s, AnpClientState::TaskProfileReady).unwrap(),
+            AnpClientState::TaskProfileReady
+        );
+    }
+
+    #[test]
+    fn reconnect_cycle_messaging_only() {
+        let s = transition(AnpClientState::MessagingOnly, AnpClientState::Connecting).unwrap();
+        let s = transition(s, AnpClientState::IdentityVerified).unwrap();
+        let s = transition(s, AnpClientState::Negotiating).unwrap();
+        assert_eq!(
+            transition(s, AnpClientState::MessagingOnly).unwrap(),
+            AnpClientState::MessagingOnly
+        );
+    }
+
+    #[test]
+    fn no_unconditional_terminal_to_connecting() {
+        // A terminal *task* is not a transport state. There is no `Terminal`
+        // state to transition from; the only paths to Connecting are via
+        // active session states or Disconnected. Assert the rest are rejected.
+        assert!(transition(AnpClientState::Connecting, AnpClientState::Connecting).is_err());
+        assert!(transition(AnpClientState::IdentityVerified, AnpClientState::Connecting).is_err());
+        assert!(transition(AnpClientState::Negotiating, AnpClientState::Connecting).is_err());
+        assert!(transition(AnpClientState::Failed, AnpClientState::Connecting).is_err());
     }
 
     #[test]

@@ -1,0 +1,10 @@
+{
+  "profile": "agent-connector.anp-task.v1",
+  "version": 1,
+  "message_type": "task.events",
+  "task_id": "t-0001",
+  "operation_id": "op-0001",
+  "message_id": "m-0030",
+  "after_seq": 4,
+  "payload": {}
+}

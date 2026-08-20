@@ -1,0 +1,14 @@
+{
+  "profile": "agent-connector.anp-task.v1",
+  "version": 1,
+  "message_type": "task.progress",
+  "task_id": "t-0001",
+  "operation_id": "op-0001",
+  "message_id": "m-0012",
+  "seq": 4,
+  "final": false,
+  "payload": {
+    "message": "reading the report",
+    "percent": 40
+  }
+}

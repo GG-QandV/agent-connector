@@ -21,6 +21,9 @@ pub mod dto;
 pub mod mapper;
 pub mod validation;
 
+#[cfg(test)]
+mod schema_conformance;
+
 pub use dto::*;
 
 /// Profile-level errors.
