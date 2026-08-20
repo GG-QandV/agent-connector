@@ -19,14 +19,17 @@ agent-connector/
 │   ├── protocol-a2a-mapper/        # A2A <-> Core semantic mapper
 │   ├── protocol-a2a-server/        # A2A HTTP router, health/readiness
 │   ├── protocol-acp-mapper/        # ACP <-> Core semantic mapper
-│   ├── protocol-acp-runtime/       # ACP stdio runtime
+│   ├── protocol-acp-runtime/       # ACP stdio runtime (lib; запуск отложен)
+│   ├── driver-a2a-client/          # A2A client (SDK/Spec wire, dialect probe)
+│   ├── driver-acp-client/          # ACP stdio client
 │   ├── driver-stdio/               # UAIC/1 NDJSON subprocess driver
 │   ├── driver-http-sse/            # UAIC/1 HTTP+SSE driver
 │   ├── driver-mcp/                 # MCP client driver (rmcp 0.8.5)
 │   ├── memory-task-store/          # in-memory TaskStore (tests/demo)
 │   ├── sqlite-task-store-adapter/  # durable single-node TaskStore
 │   ├── postgres-task-store-adapter/# multi-instance TaskStore
-│   └── adapterd/                   # composition root / daemon binary
+│   ├── adapterd/                   # composition root / daemon binary
+│   └── adapterctl/                 # installer / service manager CLI
 ├── docs/                           # entry docs + design/ (исходные спеки)
 ├── tests/                          # contract / integration / fixtures
 ├── scripts/                        # check.sh, run-local.sh
@@ -57,7 +60,9 @@ Adapterd стартует, создаёт `./data/adapter.db`, поднимае�
 |---|---|---|
 | `driver-stdio` | UAIC/1 NDJSON subprocess | готов |
 | `driver-http-sse` | UAIC/1 HTTP+SSE | готов |
-| `driver-mcp` | MCP (rmcp 0.8.5), stdio child-process | готов; discovery/invoke/progress/cancel через `CancellationToken` |
+| `driver-a2a-client` | A2A SDK/Spec wire, dialect probe | готов |
+| `driver-acp-client` | ACP stdio client | готов |
+| `driver-mcp` | MCP (rmcp 0.8.5), stdio + HTTP | готов; discovery/invoke/progress/cancel через `CancellationToken`, hot-update skills |
 
 `driver-mcp` подключается к любому MCP-серверу через stdio, обнаруживает
 инструменты через `list_tools`, вызывает их через `send_request_with_option`
@@ -114,11 +119,14 @@ language:
 `cargo test --workspace` проходят.
 
 Реализовано: A2A server (`protocol-a2a-server`), ACP runtime
-(`protocol-acp-runtime`), MCP driver (`driver-mcp`, rmcp 0.8.5, stdio + HTTP
-транспорты, progress/cancel через `CancellationToken`, input-schema
-валидация, проверка версии протокола), installer (`adapterctl`) с
+(`protocol-acp-runtime`, lib; запуск отложен), A2A/ACP client drivers
+(`driver-a2a-client` с dialect probe SDK/Spec, `driver-acp-client`), MCP driver
+(`driver-mcp`, rmcp 0.8.5, stdio + HTTP транспорты, progress/cancel через
+`CancellationToken`, input-schema валидация, проверка версии протокола,
+hot-update skills при `tools/list_changed`), installer (`adapterctl`) с
 launchd/sc.exe/systemd-слоями и graceful shutdown.
 
 Известные ограничения MCP: hot-update skills при `tools/list_changed`
-(нужен restart), multi-turn `input_required` (feature-gate), prompts/resources
+реализован (ADR-0001 R1, commit `625545b`), multi-turn `input_required`
+не поддерживается driver'ом (`provide_input` → ошибка), prompts/resources
 не маппятся — см. `docs/design/adr-0001-mcp-dynamic-capabilities.md`.

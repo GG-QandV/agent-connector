@@ -229,8 +229,9 @@ adapterd слушает HTTP (по умолчанию `0.0.0.0:8348`, смени
 
 ## 9. Известные ограничения
 
-- MCP hot-update skills при `tools/list_changed` — не реализовано (нужен
-  restart агента). См. `docs/design/adr-0001-mcp-dynamic-capabilities.md`.
-- MCP multi-turn (`input_required`) — отключено (feature-gate).
+- MCP hot-update skills при `tools/list_changed` — реализовано (ADR-0001 R1,
+  commit `625545b`), работает без restart агента.
+- MCP multi-turn (`input_required`) — не поддерживается (`provide_input`
+  возвращает ошибку).
 - MCP `prompts`/`resources` не маппятся в skills/context.
 - macOS-слой не имеет sandbox-exec изоляции (только Unix-права).

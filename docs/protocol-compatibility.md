@@ -29,10 +29,18 @@ agent, stdio JSON-RPC) и **A2A** (HTTP JSON-RPC + SSE) с единым внут
 
 ## Status
 
-Mappers реализованы (semantic DTO ↔ Core). **Wire-слои не реализованы**:
-A2A HTTP JSON-RPC/SSE server и ACP stdio JSON-RPC loop — следующие задачи
-(см. `operations.md` TODO). Mappers спроектированы так, чтобы SDK-обновление
-меняло только тонкую boundary-прослойку, не Core/stores/drivers.
+Mappers реализованы (semantic DTO ↔ Core). Wire-слои реализованы частично:
+
+- **A2A HTTP JSON-RPC/SSE server** — реализован (`protocol-a2a-server`:
+  `build_router`, executor, card, health/auth, task_store) и подключён в
+  `adapterd` (`main.rs`, `build_router`), включая `/healthz`/`/readyz`.
+- **ACP stdio JSON-RPC loop** — реализован как библиотека (`protocol-acp-runtime`:
+  `AcpRuntime`, `codec`), но запуск отдельным процессом/профилем **отложен**
+  (см. `operations.md`). ACP — унаследованная ниша без развития (стратегия §9.3),
+  поэтому интеграция loop'а в `adapterd` не приоритетна.
+
+Mappers спроектированы так, чтобы SDK-обновление меняло только тонкую
+boundary-прослойку, не Core/stores/drivers.
 
 ## Стратегия диалектов A2A (2026)
 
