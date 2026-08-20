@@ -22,11 +22,11 @@ use std::sync::Arc;
 
 use adapter_core::{
     AdapterCore, Caller, CoreCommand, CoreError, CoreEvent, CoreEventKind, DispatchResult,
-    InvokeRequest, Part, TaskId, TaskSubscription,
+    EventHistorySource, EventSeq, InvokeRequest, Part, ReliableTaskStream, TaskId,
+    TaskSubscription,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -128,6 +128,7 @@ pub trait AcpCoreService: Send + Sync {
         task_id: TaskId,
         after_seq: u64,
     ) -> Result<TaskSubscription, CoreError>;
+    async fn history(&self, task_id: TaskId, after_seq: u64) -> Result<Vec<CoreEvent>, CoreError>;
 }
 
 #[async_trait]
@@ -146,14 +147,30 @@ impl AcpCoreService for AdapterCore {
     ) -> Result<TaskSubscription, CoreError> {
         self.subscribe(task_id, after_seq).await
     }
+    async fn history(&self, task_id: TaskId, after_seq: u64) -> Result<Vec<CoreEvent>, CoreError> {
+        self.history(task_id, after_seq).await
+    }
 }
+
+#[async_trait]
+impl<C: AcpCoreService> EventHistorySource for HistorySource<C> {
+    async fn history(
+        &self,
+        task_id: TaskId,
+        after_seq: EventSeq,
+    ) -> Result<Vec<CoreEvent>, CoreError> {
+        AcpCoreService::history(&*self.0, task_id, after_seq).await
+    }
+}
+
+struct HistorySource<C: AcpCoreService>(Arc<C>);
 
 pub struct AcpMapper<C: AcpCoreService> {
     core: Arc<C>,
     initialize: AcpInitializeResult,
 }
 
-impl<C: AcpCoreService> AcpMapper<C> {
+impl<C: AcpCoreService + 'static> AcpMapper<C> {
     pub fn new(core: Arc<C>, initialize: AcpInitializeResult) -> Self {
         Self { core, initialize }
     }
@@ -248,14 +265,11 @@ impl<C: AcpCoreService> AcpMapper<C> {
             .dispatch(caller, CoreCommand::GetStatus { task_id: id })
             .await?;
         let subscription = self.core.subscribe(id, after_seq).await?;
+        let source: Arc<dyn EventHistorySource> = Arc::new(HistorySource(self.core.clone()));
+        let stream = ReliableTaskStream::new(source, id, after_seq, subscription);
         Ok(AcpUpdateStream {
             task_id: id.to_string(),
-            history: subscription
-                .history
-                .into_iter()
-                .flat_map(map_event)
-                .collect(),
-            receiver: subscription.receiver,
+            stream,
         })
     }
 }
@@ -269,19 +283,21 @@ pub struct AcpTaskRef {
 pub struct AcpUpdateStream {
     #[allow(dead_code)]
     task_id: String,
-    pub history: Vec<AcpSessionUpdate>,
-    receiver: broadcast::Receiver<CoreEvent>,
+    stream: ReliableTaskStream,
 }
 
 impl AcpUpdateStream {
-    pub async fn next(
-        &mut self,
-    ) -> Result<Option<Vec<AcpSessionUpdate>>, broadcast::error::RecvError> {
-        match self.receiver.recv().await {
-            Ok(event) => Ok(Some(map_event(event))),
-            Err(broadcast::error::RecvError::Closed) => Ok(None),
-            Err(error) => Err(error), // wire layer must re-read durable history after lag
+    pub async fn next(&mut self) -> Result<Option<Vec<AcpSessionUpdate>>, AcpMapperError> {
+        match self.stream.next().await? {
+            Some(event) => Ok(Some(map_event(event))),
+            None => Ok(None),
         }
+    }
+
+    /// Last local `CoreEvent.seq` delivered; callers persist it as their
+    /// reconnect checkpoint.
+    pub fn last_seq(&self) -> u64 {
+        self.stream.last_seq()
     }
 }
 

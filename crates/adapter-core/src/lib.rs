@@ -19,6 +19,9 @@ use uuid::Uuid;
 mod bearer_token;
 pub use bearer_token::{BearerTokenPolicy, BearerTokenPolicyError, TokenGrant};
 
+mod reliable_stream;
+pub use reliable_stream::{EventHistorySource, ReliableTaskStream};
+
 #[derive(Error, Debug)]
 pub enum CoreError {
     #[error("invalid request: {0}")]

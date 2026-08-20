@@ -1,0 +1,19 @@
+[package]
+name = "driver-anp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adapter-core.workspace = true
+adapter-model.workspace = true
+anp-transport.workspace = true
+async-trait.workspace = true
+protocol-anp-profile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

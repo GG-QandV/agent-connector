@@ -17,6 +17,9 @@ members = [
     "crates/protocol-a2a-server",
     "crates/protocol-acp-runtime",
     "crates/adapterd", "crates/adapterctl", "crates/driver-a2a-client", "crates/driver-acp-client",
+    "crates/anp-transport",
+    "crates/protocol-anp-profile",
+    "crates/driver-anp-client",
 ]
 
 [workspace.package]
@@ -77,6 +80,9 @@ driver-http-sse = { path = "crates/driver-http-sse" }
 driver-mcp = { path = "crates/driver-mcp" }
 driver-a2a-client = { path = "crates/driver-a2a-client" }
 driver-acp-client = { path = "crates/driver-acp-client" }
+anp-transport = { path = "crates/anp-transport" }
+protocol-anp-profile = { path = "crates/protocol-anp-profile" }
+driver-anp-client = { path = "crates/driver-anp-client" }
 memory-task-store = { path = "crates/memory-task-store" }
 sqlite-task-store-adapter = { path = "crates/sqlite-task-store-adapter" }
 postgres-task-store-adapter = { path = "crates/postgres-task-store-adapter" }

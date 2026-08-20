@@ -6,25 +6,36 @@ already-`pub` items from `crates/adapter-core/src/lib.rs`
 `Clone`, and the `pub struct TaskSubscription`). It does not require editing
 `AdapterCore`'s existing `impl` block.
 
-`lib.rs` was not rewritten directly in this change because the file could
-only be retrieved as partial excerpts through available tooling, and
-blindly resubmitting the full ~34KB file risked silently dropping code that
-was not visible (worker/driver dispatch loop, `AgentRegistry`, full
-`invoke`/`cancel`/`provide_input` bodies, existing `#[cfg(test)]` module).
-Apply this two-line change by hand (or via a small, reviewed diff) instead
-of a full-file replace:
+## Applied wiring (done)
+
+`crates/adapter-core/src/lib.rs` exposes the module:
 
 ```rust
-// near the other `mod` declarations, e.g. after `mod bearer_token;`
 mod reliable_stream;
 pub use reliable_stream::{EventHistorySource, ReliableTaskStream};
 ```
 
-No other changes to `lib.rs` are required. Callers migrate incrementally:
+Both protocol mappers were migrated to consume `ReliableTaskStream` instead
+of raw `TaskSubscription`/`broadcast::Receiver`:
+
+- `protocol-a2a-mapper::A2aTaskEventStream` — wraps `ReliableTaskStream`;
+  `next()` returns `Result<Option<A2aStreamEvent>, A2aMapperError>`; exposes
+  `last_seq()` for reconnect checkpoints.
+- `protocol-acp-mapper::AcpUpdateStream` — wraps `ReliableTaskStream`;
+  `next()` returns `Result<Option<Vec<AcpSessionUpdate>>, AcpMapperError>`;
+  exposes `last_seq()`.
+
+Each mapper's `A2aCoreService`/`AcpCoreService` trait gained a `history`
+method, and a local `HistorySource<C>` adapter implements
+`EventHistorySource` for the generic core wrapper. Lag/gap recovery is now
+centralized in `ReliableTaskStream`; the previous ad hoc
+`Err(error) => Err(error) // wire layer must re-read durable history after
+lag` handling in both mappers is removed.
+
+## Migration pattern for callers
 
 ```rust
-// Before (direct TaskSubscription/broadcast consumption, e.g. in a
-// protocol mapper):
+// Before (direct TaskSubscription/broadcast consumption):
 let subscription = core.subscribe(task_id, after_seq).await?;
 match subscription.receiver.recv().await { /* Lagged handled ad hoc */ }
 
@@ -37,11 +48,7 @@ while let Some(event) = stream.next().await? {
 // stream.is_terminal() is true once next() has returned Ok(None).
 ```
 
-## Suggested follow-up PRs (not part of this change)
-
-1. Migrate `protocol-a2a-mapper::A2aTaskEventStream::next()` to wrap
-   `ReliableTaskStream` instead of calling `receiver.recv()` directly.
-2. Migrate `protocol-acp-mapper::AcpUpdateStream::next()` the same way.
-3. Once both are migrated, the ad hoc `Err(error) => Err(error) // wire
-   layer must re-read durable history after lag` comments in both mappers
-   can be removed — the recovery is now centralized.
+Note: `ReliableTaskStream::subscribe` requires a concrete `&AdapterCore`.
+Generic mappers that abstract core behind a service trait must supply an
+`EventHistorySource` adapter (see the `HistorySource<C>` pattern above) and
+bound `C: 'static`.

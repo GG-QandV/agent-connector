@@ -183,6 +183,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "anp-transport"
+version = "0.6.7"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -859,6 +872,23 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "driver-anp-client"
+version = "0.6.7"
+dependencies = [
+ "adapter-core",
+ "adapter-model",
+ "anp-transport",
+ "async-trait",
+ "protocol-anp-profile",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -2767,6 +2797,21 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "protocol-anp-profile"
+version = "0.6.7"
+dependencies = [
+ "adapter-core",
+ "adapter-model",
+ "anp-transport",
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "uuid",
 ]
 

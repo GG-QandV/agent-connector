@@ -14,12 +14,11 @@
 use std::sync::Arc;
 
 use adapter_core::{
-    AdapterCore, Caller, CoreCommand, CoreEvent, CoreEventKind, DispatchResult, InvokeRequest,
-    Part, TaskId, TaskSubscription,
+    AdapterCore, Caller, CoreCommand, CoreEvent, CoreEventKind, DispatchResult, EventHistorySource,
+    EventSeq, InvokeRequest, Part, ReliableTaskStream, TaskId, TaskSubscription,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -139,6 +138,11 @@ pub trait A2aCoreService: Send + Sync {
         task_id: TaskId,
         after_seq: u64,
     ) -> Result<TaskSubscription, adapter_core::CoreError>;
+    async fn history(
+        &self,
+        task_id: TaskId,
+        after_seq: u64,
+    ) -> Result<Vec<CoreEvent>, adapter_core::CoreError>;
 }
 
 #[async_trait]
@@ -157,14 +161,34 @@ impl A2aCoreService for AdapterCore {
     ) -> Result<TaskSubscription, adapter_core::CoreError> {
         self.subscribe(task_id, after_seq).await
     }
+    async fn history(
+        &self,
+        task_id: TaskId,
+        after_seq: u64,
+    ) -> Result<Vec<CoreEvent>, adapter_core::CoreError> {
+        self.history(task_id, after_seq).await
+    }
 }
+
+#[async_trait]
+impl<C: A2aCoreService> EventHistorySource for HistorySource<C> {
+    async fn history(
+        &self,
+        task_id: TaskId,
+        after_seq: EventSeq,
+    ) -> Result<Vec<CoreEvent>, adapter_core::CoreError> {
+        A2aCoreService::history(&*self.0, task_id, after_seq).await
+    }
+}
+
+struct HistorySource<C: A2aCoreService>(Arc<C>);
 
 pub struct A2aMapper<C: A2aCoreService> {
     core: Arc<C>,
     card: AgentCard,
 }
 
-impl<C: A2aCoreService> A2aMapper<C> {
+impl<C: A2aCoreService + 'static> A2aMapper<C> {
     pub fn new(core: Arc<C>, card: AgentCard) -> Self {
         Self { core, card }
     }
@@ -256,28 +280,31 @@ impl<C: A2aCoreService> A2aMapper<C> {
             .dispatch(caller, CoreCommand::GetStatus { task_id })
             .await?;
         let subscription = self.core.subscribe(task_id, after_seq).await?;
-        Ok(A2aTaskEventStream {
-            history: subscription.history.into_iter().map(map_event).collect(),
-            receiver: subscription.receiver,
-        })
+        let source: Arc<dyn EventHistorySource> = Arc::new(HistorySource(self.core.clone()));
+        let stream = ReliableTaskStream::new(source, task_id, after_seq, subscription);
+        Ok(A2aTaskEventStream { stream })
     }
 }
 
 pub struct A2aTaskEventStream {
-    pub history: Vec<A2aStreamEvent>,
-    receiver: broadcast::Receiver<CoreEvent>,
+    stream: ReliableTaskStream,
 }
 
 impl A2aTaskEventStream {
-    /// Returns `Ok(None)` after the sender side has closed. A broadcast lag is
-    /// not silently ignored: the HTTP/SSE integration must re-read durable
-    /// events from core using the last delivered sequence.
-    pub async fn next(&mut self) -> Result<Option<A2aStreamEvent>, broadcast::error::RecvError> {
-        match self.receiver.recv().await {
-            Ok(event) => Ok(Some(map_event(event))),
-            Err(broadcast::error::RecvError::Closed) => Ok(None),
-            Err(error) => Err(error),
+    /// Returns `Ok(None)` after the task has reached a terminal state. Lag and
+    /// sequence gaps are resolved internally via durable catch-up (never
+    /// surfaced to the SDK/HTTP layer).
+    pub async fn next(&mut self) -> Result<Option<A2aStreamEvent>, A2aMapperError> {
+        match self.stream.next().await? {
+            Some(event) => Ok(Some(map_event(event))),
+            None => Ok(None),
         }
+    }
+
+    /// Last local `CoreEvent.seq` delivered; callers persist it as their
+    /// reconnect checkpoint.
+    pub fn last_seq(&self) -> u64 {
+        self.stream.last_seq()
     }
 }
 
