@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "adapter-core"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-model",
  "adapter-store-contract",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "adapter-model"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "chrono",
  "serde",
@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "adapter-store-contract"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-model",
  "async-trait",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "adapterctl"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapterd",
  "async-trait",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "adapterd"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-core",
  "adapter-model",
@@ -826,7 +826,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "driver-a2a-client"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-core",
  "adapter-model",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "driver-acp-client"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-core",
  "adapter-model",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "driver-http-sse"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-core",
  "async-trait",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "driver-mcp"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-core",
  "adapter-model",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "driver-stdio"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-core",
  "async-trait",
@@ -2034,7 +2034,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memory-task-store"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-model",
  "adapter-store-contract",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "postgres-task-store-adapter"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-model",
  "adapter-store-contract",
@@ -2703,7 +2703,7 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
 name = "protocol-a2a-mapper"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-core",
  "async-trait",
@@ -2716,7 +2716,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-a2a-server"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "a2a-lf",
  "a2a-pb",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-acp-mapper"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-core",
  "async-trait",
@@ -2754,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-acp-runtime"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-core",
  "adapter-model",
@@ -3670,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "sqlite-task-store-adapter"
-version = "0.6.7"
+version = "0.7.2"
 dependencies = [
  "adapter-model",
  "adapter-store-contract",

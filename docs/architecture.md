@@ -38,9 +38,14 @@ adapter-store-contract ← adapter-core
 - [Мультиагентная секция](design/agent-adapter-multi-agent-section.md)
 - [Пины A2A SDK](design/a2a-sdk-pinned-dependencies.toml)
 
-## Что реализовано в scaffold
+## Что реализовано
 
 Workspace собран, все crates компилируются, `cargo test --workspace` зелёный.
-Нереализованные части (A2A wire server, ACP stdio runtime, миграции Postgres,
-integration-тесты) — следующие итерации; статусы зафиксированы в
-[`operations.md`](operations.md) и TODO.
+Реализовано: A2A HTTP server (`protocol-a2a-server`, подключён в `adapterd`,
+включая `/healthz`/`/readyz`), ACP stdio runtime (`protocol-acp-runtime`,
+lib; запуск отдельным процессом — отложен, см. `protocol-compatibility.md`),
+Postgres-миграции (`migration_guard` в `postgres-task-store-adapter`),
+MCP driver (включая hot-update skills при `tools/list_changed`).
+Не реализовано: `tests/integration` (пустые каталоги, только README),
+`tests/contract`/`tests/fixtures` — заготовки. Статусы — в
+[`operations.md`](operations.md) и [`protocol-compatibility.md`](protocol-compatibility.md).

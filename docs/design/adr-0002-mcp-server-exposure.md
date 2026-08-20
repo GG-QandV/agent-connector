@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-08-16
 - **Project:** agent-connector
-- **Version context:** 0.6.7
+- **Version context:** 0.7.2
 - **Affects:** новый crate `protocol-mcp-server`; не меняет `adapter-core`, `protocol-a2a-server`, `protocol-acp-runtime`
 - **Depends on:** ADR-0001 (Решение 2 — namespace-конвенция prompts/resources; MCP-сервер и `driver-mcp` должны использовать одну и ту же конвенцию симметрично)
 
