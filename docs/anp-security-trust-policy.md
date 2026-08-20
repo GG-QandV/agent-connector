@@ -19,9 +19,9 @@ pub enum TrustPolicy {
 |---|---|---|---|
 | `PinnedDid` | Yes (default) | Yes | Peer DID must exactly match configured `peer_did`; resolved DID document's `service[ANPMessageService].serviceEndpoint` must match configured endpoint |
 | `PinnedKey` | Yes | Yes | Peer DID's `authentication` verification method key ID must be in configured `expected_key_ids` |
-| `InsecureDev` | **No** | Yes, localhost only | Endpoint host must resolve to `127.0.0.1`, `::1`, or `localhost`; any non-localhost endpoint with this mode is a hard error, not a warning |
+| `InsecureDev` | **No** | Yes, localhost only | Endpoint host must resolve to `127.0.0.1`, `::1`, or `localhost`; any non-localhost endpoint with this mode is a hard error, not a warning. **An explicit expected identity (peer DID or key ID) is still required even in this mode** — InsecureDev only relaxes the localhost/production restriction and the requirement for a full CA-style resolution chain, it never permits trust-on-first-use. A `FakeAnpTransport` or real transport implementation that accepts an unconfigured/arbitrary identity under `InsecureDev` violates this policy and must be fixed. |
 
-Trust-on-first-use (accepting whatever identity is presented on first contact and remembering it) is **never** permitted, including in `InsecureDev` — that mode still requires an explicitly configured expected identity, it only relaxes the localhost/production restriction.
+Trust-on-first-use (accepting whatever identity is presented on first contact and remembering it) is **never** permitted, in any mode, including `InsecureDev`.
 
 ## 2. Identity verification sequence (mandatory order)
 

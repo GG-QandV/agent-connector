@@ -1,210 +1,294 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-connector.dev/schemas/anp-task-v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/GG-QandV/agent-connector/docs/schemas/anp-task-v1.schema.json",
   "title": "agent-connector.anp-task.v1",
-  "description": "Canonical wire contract for the ANP embedded task profile. This schema is the source of truth; the Rust DTOs in protocol-anp-profile are aligned to it and must not diverge. Version 1.",
+  "description": "Application-level task profile transported inside ANP direct.send / direct.incoming payloads. This schema is owned by agent-connector, not by upstream ANP.",
   "type": "object",
+  "required": ["profile", "message_type", "task_id", "operation_id", "message_id", "payload"],
+  "additionalProperties": false,
   "properties": {
     "profile": {
-      "const": "agent-connector.anp-task.v1",
-      "description": "Profile identifier. Unknown profiles are rejected."
-    },
-    "version": {
-      "type": "integer",
-      "const": 1,
-      "description": "Profile version. Incompatible versions are rejected."
+      "const": "agent-connector.anp-task.v1"
     },
     "message_type": {
       "type": "string",
       "enum": [
         "task.invoke",
-        "task.cancel",
-        "task.get_status",
-        "task.provide_input",
         "task.accepted",
-        "task.status",
+        "task.get_status",
+        "task.cancel",
         "task.input_required",
+        "task.provide_input",
         "task.progress",
         "task.artifact",
+        "task.events",
         "task.completed",
         "task.failed",
-        "task.cancelled",
-        "task.events"
+        "task.cancelled"
       ]
     },
     "task_id": {
       "type": "string",
-      "minLength": 1,
-      "description": "Remote (peer-scoped) task identifier. Local core TaskId remains canonical and is correlated via this field."
+      "format": "uuid",
+      "description": "Local canonical task identifier owned by AdapterCore."
     },
     "remote_task_id": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Peer-assigned task id on inbound messages; mirrors task_id directionally."
+      "type": ["string", "null"],
+      "description": "Peer-assigned task identifier, correlation metadata only. Never used as the canonical TaskId."
     },
     "operation_id": {
       "type": "string",
       "minLength": 1,
-      "description": "Idempotency key for invoke/cancel/provide_input operations."
+      "maxLength": 256,
+      "description": "Stable idempotency key reused across retries of the same logical invoke. Maps 1:1 to InvokeRequest.idempotency_key."
     },
     "message_id": {
       "type": "string",
-      "minLength": 1,
-      "description": "Unique per-sender message identifier for dedup/ack."
+      "format": "uuid",
+      "description": "Unique identifier for this specific message delivery. Must differ between retries of the same operation_id."
     },
-    "payload": {
-      "description": "Operation/event payload, message-type specific."
+    "causation_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "message_id of the message that caused this one (e.g. task.cancel causing task.cancelled)."
     },
     "seq": {
-      "type": "integer",
+      "type": ["integer", "null"],
       "minimum": 1,
-      "description": "Strictly increasing event sequence; >= 1, no gaps, no duplicates."
+      "description": "Monotonic, durable, per-task sequence number. Required for task.progress, task.artifact, task.input_required, task.completed, task.failed, task.cancelled, task.accepted. Must be null for task.invoke, task.get_status, task.cancel, task.provide_input, task.events (request direction)."
     },
     "after_seq": {
-      "type": "integer",
+      "type": ["integer", "null"],
       "minimum": 0,
-      "description": "Resume cursor: return events with seq > after_seq. 0 = full history."
+      "description": "Only present on task.events requests: resume cursor. Peer must return all durable events with seq > after_seq, then live events."
     },
     "final": {
       "type": "boolean",
-      "description": "Terminal events (completed/failed/cancelled) must set final=true. No event may follow a final event."
+      "default": false,
+      "description": "True only on task.completed, task.failed, task.cancelled. Once true for a task_id, no further message with the same task_id may be accepted or emitted."
     },
-    "agent": {
-      "type": "string",
-      "description": "Target agent name for task.invoke."
-    },
-    "input_request_id": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Stable id correlating task.input_required with task.provide_input."
-    },
-    "prompt": {
-      "type": "string",
-      "description": "Prompt text for task.input_required."
-    },
-    "artifacts": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/artifact"
-      },
-      "description": "Artifacts produced on completion."
-    },
-    "artifact": {
-      "$ref": "#/$defs/artifact"
-    },
-    "error": {
-      "type": "string",
-      "description": "Error message for task.failed."
-    },
-    "state": {
-      "type": "string",
-      "enum": ["completed", "failed", "cancelled"],
-      "description": "Terminal state carried by task.status."
-    },
-    "capabilities": {
-      "$ref": "#/$defs/capabilities",
-      "description": "Capability flags advertised/negotiated with the profile."
+    "payload": {
+      "type": "object",
+      "description": "message_type-specific body. See per-type definitions below (enforced by protocol-anp-profile validation, not by this generic schema)."
     }
   },
-  "required": ["profile", "version", "message_type", "task_id", "operation_id", "message_id", "payload"],
   "allOf": [
     {
-      "$ref": "#/$defs/rules/seq-required"
-    },
-    {
-      "$ref": "#/$defs/rules/after-seq-required"
-    },
-    {
-      "$ref": "#/$defs/rules/terminal-final"
-    },
-    {
-      "$ref": "#/$defs/rules/input-required"
-    },
-    {
-      "$ref": "#/$defs/rules/provide-input-request"
-    }
-  ],
-  "$defs": {
-    "artifact": {
-      "type": "object",
-      "properties": {
-        "uri": { "type": "string", "minLength": 1 },
-        "mime_type": { "type": "string" }
+      "if": {
+        "properties": { "message_type": { "const": "task.invoke" } }
       },
-      "required": ["uri"]
-    },
-    "capabilities": {
-      "type": "object",
-      "properties": {
-        "supports_resume": { "type": "boolean" },
-        "supports_cancel": { "type": "boolean" },
-        "supports_input": { "type": "boolean" }
-      }
-    },
-    "rules": {
-      "seq-required": {
-        "description": "Event types require seq.",
-        "if": {
-          "properties": {
-            "message_type": {
-              "enum": [
-                "task.status",
-                "task.input_required",
-                "task.progress",
-                "task.artifact",
-                "task.completed",
-                "task.failed",
-                "task.cancelled"
-              ]
+      "then": {
+        "properties": {
+          "seq": { "const": null },
+          "after_seq": { "const": null },
+          "final": { "const": false },
+          "payload": {
+            "type": "object",
+            "required": ["input"],
+            "properties": {
+              "skill_id": { "type": ["string", "null"] },
+              "session_id": { "type": ["string", "null"], "format": "uuid" },
+              "input": { "type": "array" },
+              "context": { "type": "object" },
+              "deadline_ms": { "type": ["integer", "null"], "minimum": 1 }
             }
-          },
-          "required": ["message_type"]
-        },
-        "then": { "required": ["seq"] }
-      },
-      "after-seq-required": {
-        "description": "task.events resume request requires after_seq.",
-        "if": {
-          "properties": { "message_type": { "const": "task.events" } },
-          "required": ["message_type"]
-        },
-        "then": { "required": ["after_seq"] }
-      },
-      "terminal-final": {
-        "description": "Terminal events must set final=true; non-terminal must not.",
-        "if": {
-          "properties": {
-            "message_type": {
-              "enum": ["task.completed", "task.failed", "task.cancelled"]
-            }
-          },
-          "required": ["message_type"]
-        },
-        "then": {
-          "properties": { "final": { "const": true } },
-          "required": ["final"]
-        },
-        "else": {
-          "properties": { "final": { "const": false } }
+          }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.cancel" } }
       },
-      "input-required": {
-        "description": "task.input_required carries input_request_id and prompt.",
-        "if": {
-          "properties": { "message_type": { "const": "task.input_required" } },
-          "required": ["message_type"]
-        },
-        "then": { "required": ["input_request_id", "prompt"] }
+      "then": {
+        "properties": {
+          "seq": { "const": null },
+          "after_seq": { "const": null },
+          "final": { "const": false },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "reason": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.provide_input" } }
       },
-      "provide-input-request": {
-        "description": "task.provide_input carries input_request_id.",
-        "if": {
-          "properties": { "message_type": { "const": "task.provide_input" } },
-          "required": ["message_type"]
-        },
-        "then": { "required": ["input_request_id"] }
+      "then": {
+        "properties": {
+          "seq": { "const": null },
+          "after_seq": { "const": null },
+          "final": { "const": false },
+          "payload": {
+            "type": "object",
+            "required": ["input"],
+            "properties": {
+              "input": { "type": "array" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.get_status" } }
+      },
+      "then": {
+        "properties": {
+          "seq": { "const": null },
+          "after_seq": { "const": null },
+          "final": { "const": false },
+          "payload": { "type": "object", "maxProperties": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.events" } }
+      },
+      "then": {
+        "required": ["after_seq"],
+        "properties": {
+          "seq": { "const": null },
+          "final": { "const": false },
+          "payload": { "type": "object", "maxProperties": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.accepted" } }
+      },
+      "then": {
+        "required": ["seq"],
+        "properties": {
+          "final": { "const": false },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "queued": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.progress" } }
+      },
+      "then": {
+        "required": ["seq"],
+        "properties": {
+          "final": { "const": false },
+          "payload": {
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+              "message": { "type": "string" },
+              "percent": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.artifact" } }
+      },
+      "then": {
+        "required": ["seq"],
+        "properties": {
+          "final": { "const": false },
+          "payload": {
+            "type": "object",
+            "required": ["id", "name", "mime_type", "size_bytes"],
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "mime_type": { "type": "string" },
+              "size_bytes": { "type": "integer", "minimum": 0 },
+              "uri": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.input_required" } }
+      },
+      "then": {
+        "required": ["seq"],
+        "properties": {
+          "final": { "const": false },
+          "payload": {
+            "type": "object",
+            "required": ["request_id", "question"],
+            "properties": {
+              "request_id": {
+                "type": "string",
+                "description": "Stable identifier persisted in CoreEvent metadata; must not be regenerated on redelivery/replay."
+              },
+              "question": { "type": "string" },
+              "schema": { "type": ["object", "null"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.completed" } }
+      },
+      "then": {
+        "required": ["seq"],
+        "properties": {
+          "final": { "const": true },
+          "payload": {
+            "type": "object",
+            "required": ["output"],
+            "properties": {
+              "output": { "type": "array" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.failed" } }
+      },
+      "then": {
+        "required": ["seq"],
+        "properties": {
+          "final": { "const": true },
+          "payload": {
+            "type": "object",
+            "required": ["code", "message", "retryable"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "retryable": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "message_type": { "const": "task.cancelled" } }
+      },
+      "then": {
+        "required": ["seq"],
+        "properties": {
+          "final": { "const": true },
+          "payload": { "type": "object", "maxProperties": 0 }
+        }
       }
     }
-  },
-  "additionalProperties": false
+  ]
 }
