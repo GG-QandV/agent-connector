@@ -1,6 +1,6 @@
 # agent-connector
 
-**Version: 0.6.7**
+**Version: 0.7.2**
 
 Universal Agent Adapter Runtime — transport-neutral middleware that exposes
 local (stdio) and remote (HTTP/SSE/MCP) agents through a uniform task lifecycle
@@ -10,7 +10,7 @@ with durable storage, idempotency, retention and A2A/ACP protocol mappers.
 
 ```text
 agent-connector/
-├── Cargo.toml                      # workspace root (resolver = "2"), version = "0.6.7"
+├── Cargo.toml                      # workspace root (resolver = "2"), version = "0.7.2"
 ├── config/adapter.example.yaml     # образец конфигурации adapterd
 ├── crates/
 │   ├── adapter-model/              # DTO, identifiers, schema (no runtime)
@@ -102,7 +102,7 @@ language:
 
 ## Status
 
-Версия **0.6.7**. Workspace, crates перенесены из плоского прототипа
+Версия **0.7.2**. Workspace, crates перенесены из плоского прототипа
 (`adapter_core_v2_fix.rs` → `adapter-core`, DTO → `adapter-model`),
 `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace` проходят.

@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-08-16
 - **Project:** agent-connector
-- **Version context:** 0.6.7
+- **Version context:** 0.7.2
 - **Affects:** `adapter-core`, `driver-mcp`, `protocol-acp-runtime`, `protocol-a2a-mapper`
 
 ## Контекст
