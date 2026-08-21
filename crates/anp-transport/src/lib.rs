@@ -17,6 +17,11 @@ mod negotiation;
 mod peer;
 mod transport;
 
+#[cfg(feature = "anp")]
+mod real;
+#[cfg(feature = "anp")]
+pub use real::RealAnpTransport;
+
 pub use capabilities::{AnpCapabilities, AnpCapability};
 pub use error::{AnpError, AnpResult};
 pub use fake::{FakeAnpTransport, FakePeerSpec};
