@@ -200,10 +200,20 @@ fn capabilities(&self) -> DriverCapabilities {
 
 ## 9. Известные ограничения MVP
 
-- Динамическое обновление `RegisteredAgent.skills` при `notifications/tools/list_changed` не реализуется в первой версии — обновление skills требует restart driver (`adapterd` restart агента через существующий lifecycle, не hot-reload). Это явный, документированный trade-off, не забытая фича.
-- Multi-turn через `InputRequiredResult` — experimental, за отдельным флагом, не включено по умолчанию.
-- MCP `prompts`/`resources` primitives (отдельные от `tools`) не маппятся в этой версии — `driver-mcp` работает только с `tools` capability. Если нужен доступ к MCP resources как часть агентского контекста, это отдельная будущая задача, не часть MVP driver.
-- Пагинация `tools/list` поддерживается при discovery, но re-discovery по `list_changed` notification (если реализовано) должен корректно обрабатывать multi-page ответы так же.
+- Динамическое обновление `RegisteredAgent.skills` при
+  `notifications/tools/list_changed` — **реализовано** (ADR-0001 R1,
+  commit `625545b`): background-watcher + re-discovery + hot-update в
+  registry (см. `spawn_list_changed_watcher`, `adapter-core::AgentRegistry::update_skills`).
+- Multi-turn через `InputRequiredResult` — не поддерживается: `capabilities().provide_input`
+  возвращает `false`, `provide_input()` возвращает `CoreError::InvalidRequest`
+  («MCP driver does not support mid-call input in this version»). Experimental SEP
+  не реализован, флага `allow_experimental_input_required` в конфиге нет.
+- MCP `prompts`/`resources` primitives (отдельные от `tools`) не маппятся в этой
+  версии — `driver-mcp` работает только с `tools` capability. Если нужен доступ к MCP
+  resources как часть агентского контекста, это отдельная будущая задача.
+- Пагинация `tools/list` поддерживается при discovery, но re-discovery по
+  `list_changed` notification (горячее обновление) должен корректно обрабатывать
+  multi-page ответы так же.
 
 ## 10. Тесты
 

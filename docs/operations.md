@@ -57,13 +57,12 @@ cargo run -p adapterd -- adapter.yaml
 
 ## Health / readiness
 
-В scaffold wire-серверов ещё нет (см. TODO), поэтому внешних health-эндпоинтов
-нет. Локально состояние проверяется:
+Реализованы в `protocol-a2a-server` (`health_router`: `/healthz` — процесс жив,
+`/readyz` — storage/registry) и подключены в `adapterd` через `build_router`.
+Дополнительно локально:
 
 - процесс жив: `systemctl status adapterd` (если systemd) или `pgrep adapterd`;
 - retention-cleanup работает: в логах строки `retention cleanup complete`.
-
-Добавление HTTP health/readiness — в скоупе A2A server.
 
 ## Логи
 
