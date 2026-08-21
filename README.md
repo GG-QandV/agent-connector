@@ -33,6 +33,12 @@ agent-connector/
 └── deploy/                         # docker-compose.postgres.yaml, systemd unit
 ```
 
+## Architecture
+
+![Architecture diagram](docs/architecture.svg)
+
+6 слоёв: External Clients → Protocol Servers → Core Runtime → Storage → Drivers → Binaries.
+
 ## Quick start (SQLite, local)
 
 ```bash
