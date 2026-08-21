@@ -7,7 +7,9 @@
   "message_id": "m-0020",
   "seq": 7,
   "final": true,
-  "payload": {},
+  "payload": {
+    "output": [{"type": "text", "text": "Q3 report summary: revenue up 15%"}]
+  },
   "artifacts": [
     {
       "uri": "https://peer.example/artifacts/t-0001/summary.md",

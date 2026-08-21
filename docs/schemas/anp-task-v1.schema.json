@@ -10,6 +10,15 @@
     "profile": {
       "const": "agent-connector.anp-task.v1"
     },
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Profile version."
+    },
+    "agent": {
+      "type": "string",
+      "description": "Agent identifier."
+    },
     "message_type": {
       "type": "string",
       "enum": [
@@ -66,6 +75,15 @@
       "type": "boolean",
       "default": false,
       "description": "True only on task.completed, task.failed, task.cancelled. Once true for a task_id, no further message with the same task_id may be accepted or emitted."
+    },
+    "artifacts": {
+      "type": "array",
+      "default": [],
+      "description": "Artifact references attached to the completed task."
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "Error message for task.failed."
     },
     "payload": {
       "type": "object",
@@ -248,6 +266,7 @@
         "required": ["seq"],
         "properties": {
           "final": { "const": true },
+          "artifacts": { "type": "array" },
           "payload": {
             "type": "object",
             "required": ["output"],
@@ -266,6 +285,7 @@
         "required": ["seq"],
         "properties": {
           "final": { "const": true },
+          "error": { "type": ["string", "null"] },
           "payload": {
             "type": "object",
             "required": ["code", "message", "retryable"],

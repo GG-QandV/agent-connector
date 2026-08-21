@@ -7,6 +7,6 @@
   "message_id": "m-0001",
   "agent": "assistant",
   "payload": {
-    "query": "summarize the Q3 report"
+    "input": [{"type": "text", "text": "summarize the Q3 report"}]
   }
 }

@@ -78,7 +78,7 @@ fn dto_invoke_serialization_passes_schema() {
     let msg = TaskEvent::TaskInvoke(TaskInvoke {
         envelope: env(),
         agent: "assistant".into(),
-        payload: serde_json::json!({"query": "hello"}),
+        payload: serde_json::json!({"input": [{"type": "text", "text": "hello"}]}),
     });
     let value = serde_json::to_value(&msg).unwrap();
     assert_valid(&v, &value);
@@ -107,7 +107,7 @@ fn dto_completed_serialization_passes_schema() {
             uri: "https://peer.example/artifacts/summary.md".into(),
             mime_type: Some("text/markdown".into()),
         }],
-        payload: serde_json::json!({}),
+        payload: serde_json::json!({"output": [{"type": "text", "text": "done"}]}),
     });
     let value = serde_json::to_value(&msg).unwrap();
     assert_valid(&v, &value);
@@ -119,7 +119,7 @@ fn unknown_profile_rejected_by_schema() {
     let mut msg = TaskEvent::TaskProgress(TaskProgress {
         envelope: env(),
         seq: 4,
-        payload: serde_json::json!({}),
+        payload: serde_json::json!({"message": "working"}),
     });
     let value = serde_json::to_value(&msg).unwrap();
     assert_valid(&v, &value);
@@ -184,7 +184,7 @@ fn missing_operation_id_rejected_by_schema() {
         "task_id": "t-0001",
         "message_id": "m-0001",
         "agent": "assistant",
-        "payload": {}
+        "payload": {"input": [{"type": "text", "text": "hello"}]}
     });
     assert_invalid(&v, &value);
     value["operation_id"] = serde_json::json!("op-0001");
