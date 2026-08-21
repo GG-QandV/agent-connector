@@ -1,59 +1,113 @@
 # Protocol compatibility
 
-Agent-connector — двусторонний конвертер между **ACP** (editor/CLI ↔ coding
-agent, stdio JSON-RPC) и **A2A** (HTTP JSON-RPC + SSE) с единым внутренним
-жизненным циклом задач (UAIC).
+Agent-connector is a bidirectional converter between **ACP** (editor/CLI ↔ coding
+agent, stdio JSON-RPC) and **A2A** (HTTP JSON-RPC + SSE) with a unified internal
+task lifecycle (UAIC).
 
-## Потоки
+## Flows
 
-| Клиент | Направление | Транспорт |
+| Client | Direction | Transport |
 |---|---|---|
-| ACP | ACP-агент ↔ runtime | stdio JSON-RPC |
-| A2A | runtime ↔ удалённый агент | HTTP JSON-RPC + SSE |
-| UAIC | runtime ↔ агент (любой) | NDJSON (stdio) / HTTP+SSE |
+| ACP | ACP agent ↔ runtime | stdio JSON-RPC |
+| A2A | runtime ↔ remote agent | HTTP JSON-RPC + SSE |
+| UAIC | runtime ↔ agent (any) | NDJSON (stdio) / HTTP+SSE |
+| ANP | runtime ↔ ANP peer | HTTPS + HTTP Message Signatures |
 
 ## Semantic mapping
 
-- `protocol-a2a-mapper` переводит A2A Task/Message/Artifact → `CoreCommand`,
-  и `CoreEvent` → A2A Task/Stream events.
-- `protocol-acp-mapper` переводит ACP session prompt/update → `CoreCommand`,
-  и `CoreEvent` → ACP session updates.
-- Drivers (`driver-stdio`, `driver-http-sse`) говорят на UAIC/1 и возвращают
-  только normalized `DriverEvent`.
+- `protocol-a2a-mapper` translates A2A Task/Message/Artifact → `CoreCommand`,
+  and `CoreEvent` → A2A Task/Stream events.
+- `protocol-acp-mapper` translates ACP session prompt/update → `CoreCommand`,
+  and `CoreEvent` → ACP session updates.
+- Drivers (`driver-stdio`, `driver-http-sse`) speak UAIC/1 and return
+  only normalized `DriverEvent`.
 
 ## UAIC/1
 
-Единый контракт runtime ↔ агент: один JSON-объект на строку (stdio) или
-`POST`/SSE-фреймы (HTTP). Пин SDK и детали — в
+Unified contract runtime ↔ agent: one JSON object per line (stdio) or
+`POST`/SSE frames (HTTP). SDK pin and details in
 `design/universal-agent-adapter-module-specifications.md` (§2 UAIC).
+
+## ANP transport
+
+Real ANP transport is feature-gated behind `anp` in `crates/anp-transport`.
+
+### SDK pin
+
+```toml
+anp-sdk = { package = "anp", git = "https://github.com/agent-network-protocol/AgentConnect", rev = "aaca169c3e5b051e48875b023b60364a1dd93022", default-features = false, features = ["jwt-pem", "network"] }
+```
+
+- **Revision:** `aaca169c3e5b051e48875b023b60364a1dd93022` (exact 40-char SHA)
+- **Features enabled:** `jwt-pem`, `network`
+- **Features excluded:** `mls` (group E2EE out of scope per security policy §4)
+- **Default build:** `anp` feature is NOT enabled — zero new dependencies pulled in
+
+### Dependency tree (depth 2)
+
+```text
+anp-transport v0.7.2
+├── anp v0.9.4 (rev aaca169c)
+│   ├── base64 v0.22.1
+│   ├── bs58 v0.5.1
+│   ├── chrono v0.4.45
+│   ├── ed25519-dalek v2.1.1
+│   ├── jsonwebtoken v9.3.1
+│   ├── k256 v0.13.4
+│   ├── num-bigint v0.4.8
+│   ├── p256 v0.13.2
+│   ├── pkcs8 v0.10.2
+│   ├── rand v0.8.7
+│   ├── regex v1.13.1
+│   ├── reqwest v0.12.28
+│   ├── ring v0.17.14
+│   ├── serde v1.0.229
+│   ├── serde_json v1.0.151
+│   ├── serde_json_canonicalizer v0.3.2
+│   ├── sha2 v0.10.9
+│   ├── spki v0.7.3
+│   ├── thiserror v1.0.69
+│   ├── tiny_http v0.12.0
+│   ├── tokio v1.53.1
+│   ├── url v2.5.8
+│   ├── x25519-dalek v2.0.1
+│   └── zeroize v1.9.0
+├── reqwest v0.12.28 (optional, feature-gated)
+├── url v2.5.8 (optional, feature-gated)
+└── [existing deps: async-trait, chrono, serde, serde_json, thiserror, tracing, uuid]
+```
 
 ## Status
 
-Mappers реализованы (semantic DTO ↔ Core). Wire-слои реализованы частично:
+Mappers are implemented (semantic DTO ↔ Core). Wire layers are partially implemented:
 
-- **A2A HTTP JSON-RPC/SSE server** — реализован (`protocol-a2a-server`:
-  `build_router`, executor, card, health/auth, task_store) и подключён в
-  `adapterd` (`main.rs`, `build_router`), включая `/healthz`/`/readyz`.
-- **ACP stdio JSON-RPC loop** — реализован как библиотека (`protocol-acp-runtime`:
-  `AcpRuntime`, `codec`), но запуск отдельным процессом/профилем **отложен**
-  (см. `operations.md`). ACP — унаследованная ниша без развития (стратегия §9.3),
-  поэтому интеграция loop'а в `adapterd` не приоритетна.
+- **A2A HTTP JSON-RPC/SSE server** — implemented (`protocol-a2a-server`:
+  `build_router`, executor, card, health/auth, task_store) and wired in
+  `adapterd` (`main.rs`, `build_router`), including `/healthz`/`/readyz`.
+- **ACP stdio JSON-RPC loop** — implemented as library (`protocol-acp-runtime`:
+  `AcpRuntime`, `codec`), but launch as separate process/profile is **deferred**
+  (see `operations.md`). ACP is a legacy niche without development (strategy §9.3),
+  so loop integration into `adapterd` is not prioritized.
+- **ANP transport** — `RealAnpTransport` implemented in `crates/anp-transport/src/real.rs`
+  (feature-gated `anp`). Identity verification, capability negotiation, and signed
+  requests are wired. HTTP Message Signature signing is stubbed (TODO: integrate
+  `anp_sdk::authentication::http_signatures`).
 
-Mappers спроектированы так, чтобы SDK-обновление меняло только тонкую
-boundary-прослойку, не Core/stores/drivers.
+Mappers are designed so SDK updates only change the thin boundary layer,
+not Core/stores/drivers.
 
-## Стратегия диалектов A2A (2026)
+## A2A dialect strategy (2026)
 
-Протокольная стратегия обоих продуктов (шлюз + адаптер) зафиксирована в
-`docs/A2A-protocol-strategy-2026.md` (версии EN/UK/RU — рядом, `.summary.md` —
-краткие резюме; единое ТЗ — `docs/TZ-a2a-dialects-gateway-adapter.md`):
+Protocol strategy for both products (gateway + adapter) is documented in
+`docs/A2A-protocol-strategy-2026.md` (EN/UK/RU versions; `.summary.md` —
+short summaries; unified spec — `docs/TZ-a2a-dialects-gateway-adapter.md`):
 
-1. **База — A2A SDK (v1.0, ProtoJSON):** `SendMessage`/`GetTask`/`CancelTask`.
-2. **Fallback — A2A Spec (pre-1.0):** `message/send`/`tasks/get` — совместимость
-   со старыми клиентами (Python `a2a-sdk` и др.).
-3. **Deep fallback — ACP:** только унаследованные инсталляции, без развития.
-4. **ANP (W3C DID)** — отдельная ниша, вне scope.
+1. **Base — A2A SDK (v1.0, ProtoJSON):** `SendMessage`/`GetTask`/`CancelTask`.
+2. **Fallback — A2A Spec (pre-1.0):** `message/send`/`tasks/get` — compatibility
+   with older clients (Python `a2a-sdk` etc.).
+3. **Deep fallback — ACP:** legacy installations only, no development.
+4. **ANP (W3C DID)** — separate niche, out of scope.
 
-Влияние на wire-слои адаптера: `driver-a2a-client` получает `wire_format: auto`
-(диалект-зонд + кэш на эндпоинт, приоритет SDK); `protocol-a2a-server` — приём
-Spec на входе. Детали и DoD — в §9.2 документа стратегии.
+Impact on adapter wire layers: `driver-a2a-client` gets `wire_format: auto`
+(dialect probe + endpoint cache, SDK priority); `protocol-a2a-server` — accepts
+Spec on input. Details and DoD in §9.2 of the strategy document.
