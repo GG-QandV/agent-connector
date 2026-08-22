@@ -5,10 +5,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-default = []
-anp = ["dep:anp-sdk", "dep:reqwest", "dep:url"]
-
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
@@ -17,9 +13,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-anp-sdk = { package = "anp", git = "https://github.com/agent-network-protocol/AgentConnect", rev = "aaca169c3e5b051e48875b023b60364a1dd93022", default-features = false, features = ["jwt-pem", "network"], optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
-url = { version = "2", optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
