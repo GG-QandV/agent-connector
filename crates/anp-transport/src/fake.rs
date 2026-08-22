@@ -177,6 +177,7 @@ impl AnpTransport for FakeAnpTransport {
         Ok(VerifiedAnpPeer {
             identity: presented,
             trust: TrustLevel::InsecureDev,
+            did_document: None,
         })
     }
 

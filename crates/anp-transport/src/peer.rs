@@ -33,6 +33,9 @@ pub struct VerifiedAnpPeer {
     pub identity: PeerIdentity,
     /// Trust level under which the peer was verified.
     pub trust: TrustLevel,
+    /// Resolved DID document (needed for HTTP Message Signature signing).
+    /// `None` for fake/insecure-dev transports that don't do real signing.
+    pub did_document: Option<serde_json::Value>,
 }
 
 /// Verified identity claims for an ANP peer.

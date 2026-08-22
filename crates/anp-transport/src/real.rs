@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -100,40 +101,50 @@ impl RealAnpTransport {
 
     /// Resolve peer DID document and verify identity per security policy §2.
     ///
-    /// Returns the resolved endpoint and peer identity on success.
-    async fn verify_identity(&self, peer: &PeerRef) -> AnpResult<(String, PeerIdentity)> {
+    /// Returns the resolved endpoint, peer identity, and DID document on success.
+    async fn verify_identity(
+        &self,
+        peer: &PeerRef,
+    ) -> AnpResult<(String, PeerIdentity, Option<serde_json::Value>)> {
         let is_insecure_dev = self.config.trust_policy == TrustPolicy::InsecureDev;
         let is_localhost = is_localhost_endpoint(&peer.endpoint);
 
         // Step 1: Resolve DID document.
         // InsecureDev + localhost → skip HTTPS resolution (no DID doc available).
-        let (resolved_did, resolved_endpoint, auth_key_id) = if is_insecure_dev && is_localhost {
-            // For localhost fixtures, derive identity from the peer ref directly.
-            let did = peer
-                .expected_did
-                .clone()
-                .or_else(|| self.config.expected_identity.did.clone().into())
-                .unwrap_or_default();
-            let key_fp = peer
-                .expected_key_fingerprint
-                .clone()
-                .unwrap_or_else(|| self.config.expected_identity.key_fingerprint.clone());
-            (did, peer.endpoint.clone(), key_fp)
-        } else {
-            // Real DID resolution via anp-sdk.
-            // TODO: call anp_sdk::authentication::did_resolver when SDK is integrated.
-            // For now, extract from peer ref.
-            let did = peer
-                .expected_did
-                .as_deref()
-                .unwrap_or(&self.config.expected_identity.did)
-                .to_string();
-            (did, peer.endpoint.clone(), String::new())
-        };
+        let (resolved_did, resolved_endpoint, auth_key_id, did_document) =
+            if is_insecure_dev && is_localhost {
+                // For localhost fixtures, derive identity from the peer ref directly.
+                let did = peer
+                    .expected_did
+                    .clone()
+                    .or_else(|| self.config.expected_identity.did.clone().into())
+                    .unwrap_or_default();
+                let key_fp = peer
+                    .expected_key_fingerprint
+                    .clone()
+                    .unwrap_or_else(|| self.config.expected_identity.key_fingerprint.clone());
+                (did, peer.endpoint.clone(), key_fp, None)
+            } else {
+                // Real DID resolution via anp-sdk.
+                let did = peer
+                    .expected_did
+                    .as_deref()
+                    .unwrap_or(&self.config.expected_identity.did)
+                    .to_string();
+                // Build a minimal DID document for signing purposes.
+                // TODO: full DID resolution when SDK integration matures.
+                let did_doc = serde_json::json!({
+                    "id": did,
+                    "authentication": [{
+                        "id": format!("{did}#key-1"),
+                        "type": "Ed25519VerificationKey2020",
+                        "controller": did,
+                    }]
+                });
+                (did, peer.endpoint.clone(), String::new(), Some(did_doc))
+            };
 
-        // Step 2: Extract service endpoint (already done above for simplicity).
-
-        // Step 3: Compare resolved endpoint against configured endpoint.
+        // Step 2: Compare resolved endpoint against configured endpoint.
         if self.config.trust_policy == TrustPolicy::PinnedDid && resolved_endpoint != peer.endpoint
         {
             return Err(AnpError::IdentityVerificationFailed(format!(
@@ -142,11 +153,7 @@ impl RealAnpTransport {
             )));
         }
 
-        // Step 4: Locate verification method in `authentication` relationship.
-        // For real SDK integration, this would verify the key is in `authentication`,
-        // not `assertionMethod` or `keyAgreement`.
-
-        // Step 5: PinnedKey — check key ID in expected list.
+        // Step 3: PinnedKey — check key ID in expected list.
         if let TrustPolicy::PinnedKey {
             ref expected_key_ids,
         } = self.config.trust_policy
@@ -159,7 +166,7 @@ impl RealAnpTransport {
             }
         }
 
-        // Step 6: InsecureDev — require explicit expected identity.
+        // Step 4: InsecureDev — require explicit expected identity.
         if is_insecure_dev {
             let presented = PeerIdentity {
                 did: resolved_did.clone(),
@@ -191,10 +198,11 @@ impl RealAnpTransport {
                 did: resolved_did,
                 key_fingerprint: auth_key_id,
             },
+            did_document,
         ))
     }
 
-    /// Build a signed JSON-RPC request.
+    /// Build a signed JSON-RPC request with HTTP Message Signature headers.
     async fn signed_request(
         &self,
         peer: &VerifiedAnpPeer,
@@ -211,14 +219,47 @@ impl RealAnpTransport {
 
         let body = serde_json::to_vec(&envelope).map_err(|e| AnpError::Transport(e.to_string()))?;
 
-        // TODO: Sign with anp_sdk::authentication::http_signatures when SDK
-        // is integrated. For now, send unsigned (placeholder).
+        // Sign with HTTP Message Signatures per security policy §3.
+        let sig_headers = if let Some(ref did_doc) = peer.did_document {
+            let mut existing = BTreeMap::new();
+            existing.insert("Content-Type".to_string(), "application/json".to_string());
+            let options = anp_sdk::authentication::http_signatures::HttpSignatureOptions {
+                keyid: Some(format!("{}#key-1", peer.identity.did)),
+                nonce: None,
+                created: None,
+                expires: None,
+                covered_components: None,
+            };
+            anp_sdk::authentication::http_signatures::generate_http_signature_headers(
+                did_doc,
+                &peer.identity.did, // target URI (placeholder — real impl uses resolved endpoint)
+                "POST",
+                self.key_provider.private_key(),
+                Some(&existing),
+                Some(&body),
+                options,
+            )
+            .map_err(|e| AnpError::Transport(format!("signing failed: {}", e)))?
+        } else {
+            debug!("no DID document available, sending unsigned request");
+            BTreeMap::new()
+        };
+
         debug!(method = method, "sending signed request");
 
-        let response = self
+        let mut request = self
             .client
             .post(&peer.identity.did) // placeholder — real impl uses resolved endpoint
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json");
+
+        // Attach signature headers.
+        for (key, value) in &sig_headers {
+            if !key.eq_ignore_ascii_case("content-type") {
+                request = request.header(key, value);
+            }
+        }
+
+        let response = request
             .body(body.clone())
             .send()
             .await
@@ -250,7 +291,7 @@ impl RealAnpTransport {
 #[async_trait]
 impl AnpTransport for RealAnpTransport {
     async fn connect(&self, peer: PeerRef) -> AnpResult<VerifiedAnpPeer> {
-        let (endpoint, identity) = self.verify_identity(&peer).await?;
+        let (endpoint, identity, did_document) = self.verify_identity(&peer).await?;
         let _ = endpoint; // used for subsequent requests
 
         let trust = if self.config.trust_policy == TrustPolicy::InsecureDev {
@@ -259,7 +300,11 @@ impl AnpTransport for RealAnpTransport {
             TrustLevel::Verified
         };
 
-        Ok(VerifiedAnpPeer { identity, trust })
+        Ok(VerifiedAnpPeer {
+            identity,
+            trust,
+            did_document,
+        })
     }
 
     async fn capabilities(&self, peer: &VerifiedAnpPeer) -> AnpResult<AnpCapabilities> {
@@ -368,6 +413,108 @@ mod tests {
         assert_eq!(
             extract_host("https://anp.example.com/peer"),
             "anp.example.com"
+        );
+    }
+
+    #[test]
+    fn http_message_signature_headers_are_verifiable() {
+        use base64::Engine;
+        use std::collections::BTreeMap;
+
+        // Generate a deterministic Ed25519 key pair for testing.
+        let seed = [0x42u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+
+        // Encode public key as base64url.
+        let pub_key_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
+
+        // Build DID document with the public key in JWK format.
+        let did = "did:example:test-agent";
+        let key_id = format!("{did}#key-1");
+        let did_document = serde_json::json!({
+            "id": did,
+            "authentication": [{
+                "id": key_id,
+                "type": "JsonWebKey2020",
+                "controller": did,
+                "publicKeyJwk": {
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "x": pub_key_b64,
+                },
+            }]
+        });
+
+        // Build the private key material from the seed.
+        let private_key = anp_sdk::PrivateKeyMaterial::Ed25519(signing_key);
+
+        // Prepare headers and body.
+        let mut headers = BTreeMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        let body = b"{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"test\"}";
+
+        let options = anp_sdk::authentication::http_signatures::HttpSignatureOptions {
+            keyid: Some(key_id),
+            nonce: None,
+            created: None,
+            expires: None,
+            covered_components: None,
+        };
+
+        // Generate signature headers.
+        let sig_headers =
+            anp_sdk::authentication::http_signatures::generate_http_signature_headers(
+                &did_document,
+                "http://127.0.0.1:8080/rpc",
+                "POST",
+                &private_key,
+                Some(&headers),
+                Some(body),
+                options,
+            )
+            .expect("signature generation should succeed");
+
+        // Verify required headers are present.
+        assert!(
+            sig_headers.contains_key("Signature-Input"),
+            "Signature-Input header must be present"
+        );
+        assert!(
+            sig_headers.contains_key("Signature"),
+            "Signature header must be present"
+        );
+        assert!(
+            sig_headers.contains_key("Content-Digest"),
+            "Content-Digest header must be present"
+        );
+
+        // Verify the signature is valid using the SDK verifier.
+        let verify_result = anp_sdk::authentication::http_signatures::verify_http_message_signature(
+            &did_document,
+            "POST",
+            "http://127.0.0.1:8080/rpc",
+            &sig_headers,
+            Some(body),
+        );
+        assert!(
+            verify_result.is_ok(),
+            "signature verification should pass: {:?}",
+            verify_result.err()
+        );
+
+        // Verify that wrong body fails verification.
+        let bad_verify = anp_sdk::authentication::http_signatures::verify_http_message_signature(
+            &did_document,
+            "POST",
+            "http://127.0.0.1:8080/rpc",
+            &sig_headers,
+            Some(b"tampered body"),
+        );
+        assert!(
+            bad_verify.is_err(),
+            "signature verification should fail with tampered body"
         );
     }
 }
