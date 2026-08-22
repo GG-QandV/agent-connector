@@ -11,7 +11,7 @@ with durable storage, idempotency, retention and A2A/ACP protocol mappers.
 ```text
 agent-connector/
 ├── Cargo.toml                      # workspace root (resolver = "2"), version = "0.7.2"
-├── config/adapter.example.yaml     # example adapterd configuration
+├── config/adapter.example.yaml     # образец конфигурации adapterd
 ├── crates/
 │   ├── adapter-model/              # DTO, identifiers, schema (no runtime)
 │   ├── adapter-store-contract/     # TaskStore trait + retention
@@ -19,7 +19,7 @@ agent-connector/
 │   ├── protocol-a2a-mapper/        # A2A <-> Core semantic mapper
 │   ├── protocol-a2a-server/        # A2A HTTP router, health/readiness
 │   ├── protocol-acp-mapper/        # ACP <-> Core semantic mapper
-│   ├── protocol-acp-runtime/       # ACP stdio runtime (lib; launch deferred)
+│   ├── protocol-acp-runtime/       # ACP stdio runtime (lib; запуск отложен)
 │   ├── driver-a2a-client/          # A2A client (SDK/Spec wire, dialect probe)
 │   ├── driver-acp-client/          # ACP stdio client
 │   ├── driver-stdio/               # UAIC/1 NDJSON subprocess driver
@@ -30,7 +30,7 @@ agent-connector/
 │   ├── postgres-task-store-adapter/# multi-instance TaskStore
 │   ├── adapterd/                   # composition root / daemon binary
 │   └── adapterctl/                 # installer / service manager CLI
-├── docs/                           # entry docs + design/ (source specs)
+├── docs/                           # entry docs + design/ (исходные спеки)
 ├── tests/                          # contract / integration / fixtures
 ├── scripts/                        # check.sh, run-local.sh
 └── deploy/                         # docker-compose.postgres.yaml, systemd unit
@@ -40,7 +40,7 @@ agent-connector/
 
 ![Architecture diagram](docs/architecture.svg)
 
-6 layers: External Clients → Protocol Servers → Core Runtime → Storage → Drivers → Binaries.
+6 слоёв: External Clients → Protocol Servers → Core Runtime → Storage → Drivers → Binaries.
 
 ## Quick start (SQLite, local)
 
@@ -50,26 +50,26 @@ cp config/adapter.example.yaml adapter.yaml
 cargo run -p adapterd -- adapter.yaml
 ```
 
-Adapterd starts, creates `./data/adapter.db`, launches agents from config
-(stdio / HTTP+SSE / MCP transport) and runs background retention-cleanup.
-Logs are written via `tracing`.
+Adapterd стартует, создаёт `./data/adapter.db`, поднимает агентов из конфига
+(stdio / HTTP+SSE / MCP-транспорт) и выполняет фоновую retention-cleanup.
+Логи пишутся через `tracing`.
 
 ## Drivers
 
-| Driver | Transport | Status |
+| Driver | Транспорт | Статус |
 |---|---|---|
-| `driver-stdio` | UAIC/1 NDJSON subprocess | ready |
-| `driver-http-sse` | UAIC/1 HTTP+SSE | ready |
-| `driver-a2a-client` | A2A SDK/Spec wire, dialect probe | ready |
-| `driver-acp-client` | ACP stdio client | ready |
-| `driver-mcp` | MCP (rmcp 0.8.5), stdio + HTTP | ready; discovery/invoke/progress/cancel via `CancellationToken`, hot-update skills |
+| `driver-stdio` | UAIC/1 NDJSON subprocess | готов |
+| `driver-http-sse` | UAIC/1 HTTP+SSE | готов |
+| `driver-a2a-client` | A2A SDK/Spec wire, dialect probe | готов |
+| `driver-acp-client` | ACP stdio client | готов |
+| `driver-mcp` | MCP (rmcp 0.8.5), stdio + HTTP | готов; discovery/invoke/progress/cancel через `CancellationToken`, hot-update skills |
 
-`driver-mcp` connects to any MCP server via stdio, discovers tools via
-`list_tools`, invokes them via `send_request_with_option` + `RequestHandle`,
-subscribes to progress events via built-in `ProgressDispatcher`, and supports
-cancel — `RequestHandle` stays inside the spawned task, only `CancellationToken`
-is passed externally to avoid moved-value conflict between `await_response(self)`
-and `cancel(self, ..)`.
+`driver-mcp` подключается к любому MCP-серверу через stdio, обнаруживает
+инструменты через `list_tools`, вызывает их через `send_request_with_option`
++ `RequestHandle`, подписывается на progress-события через встроенный
+`ProgressDispatcher`, и поддерживает cancel — `RequestHandle` остаётся внутри
+spawn'нутой задачи, снаружи передаётся только `CancellationToken`, чтобы
+избежать moved-value конфликта между `await_response(self)` и `cancel(self, ..)`.
 
 ## Installer: adapterctl
 
@@ -77,28 +77,28 @@ and `cancel(self, ..)`.
 launchd, Windows sc.exe):
 
 ```bash
-sudo adapterctl install --storage sqlite --start     # install as service
-sudo adapterctl restart                               # restart
-sudo adapterctl uninstall --purge-data                # remove with data
+sudo adapterctl install --storage sqlite --start     # установить как службу
+sudo adapterctl restart                               # перезапустить
+sudo adapterctl uninstall --purge-data                # удалить вместе с данными
 ```
 
-Managed Docker Postgres installation requires `--confirm-docker`; secrets
-(DSN, bearer tokens) are written only to `.env` next to the config — never in
-`adapter.yaml`. Details: `docs/user-guide.md`.
+Установка с managed Docker Postgres требует `--confirm-docker`; секреты
+(DSN, bearer-токены) пишутся только в `.env` рядом с конфигом — никогда в
+`adapter.yaml`. Подробности: `docs/user-guide.md`.
 
 ## Design documents
 
-Source specs and architecture are in `docs/design/`:
+Исходные спеки и архитектура перенесены в `docs/design/`:
 
-- `adapter_core.rs` — runtime architecture
-- `adapter_core_v2.rs` — module specs
-- `adapter_core_v2_fix.rs` — production NFR
-- `adapter_store_contract.rs` — store contract
-- `adapterd_config.rs` — configuration format
+- `rust-agent-adapter-architecture.md` — архитектура рантайма
+- `universal-agent-adapter-module-specifications.md` — поcrate-спеки
+- `universal-agent-adapter-production-nfr.md` — производственные NFR
+- `agent-adapter-multi-agent-section.md` — мультиагентная секция
+- `a2a-sdk-pinned-dependencies.toml` — пины A2A SDK
 
-Overview: `docs/architecture.md`. Operations: `docs/operations.md`.
-Protocol compatibility: `docs/protocol-compatibility.md`.
-User guide: `docs/user-guide.md`. Contributing: `docs/contributing.md`.
+Краткая вводная: `docs/architecture.md`. Эксплуатация: `docs/operations.md`.
+Совместимость протоколов: `docs/protocol-compatibility.md`.
+Пользователь: `docs/user-guide.md`. Контрибуторам: `docs/contributing.md`.
 
 ## A2A Protocol Strategy 2026
 
@@ -113,20 +113,20 @@ language:
 
 ## Status
 
-Version **0.7.2**. Workspace, crates migrated from flat prototype
+Версия **0.7.2**. Workspace, crates перенесены из плоского прототипа
 (`adapter_core_v2_fix.rs` → `adapter-core`, DTO → `adapter-model`),
 `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo test --workspace` all pass.
+`cargo test --workspace` проходят.
 
-Implemented: A2A server (`protocol-a2a-server`), ACP runtime
-(`protocol-acp-runtime`, lib; launch deferred), A2A/ACP client drivers
-(`driver-a2a-client` with dialect probe SDK/Spec, `driver-acp-client`), MCP driver
-(`driver-mcp`, rmcp 0.8.5, stdio + HTTP transports, progress/cancel via
-`CancellationToken`, input-schema validation, protocol version check,
-hot-update skills on `tools/list_changed`), installer (`adapterctl`) with
-launchd/sc.exe/systemd layers and graceful shutdown.
+Реализовано: A2A server (`protocol-a2a-server`), ACP runtime
+(`protocol-acp-runtime`, lib; запуск отложен), A2A/ACP client drivers
+(`driver-a2a-client` с dialect probe SDK/Spec, `driver-acp-client`), MCP driver
+(`driver-mcp`, rmcp 0.8.5, stdio + HTTP транспорты, progress/cancel через
+`CancellationToken`, input-schema валидация, проверка версии протокола,
+hot-update skills при `tools/list_changed`), installer (`adapterctl`) с
+launchd/sc.exe/systemd-слоями и graceful shutdown.
 
-Known MCP limitations: hot-update skills on `tools/list_changed`
-implemented (ADR-0001 R1, commit `625545b`), multi-turn `input_required`
-not supported by driver (`provide_input` → error), prompts/resources
-not mapped — see `docs/design/adr-0001-mcp-dynamic-capabilities.md`.
+Известные ограничения MCP: hot-update skills при `tools/list_changed`
+реализован (ADR-0001 R1, commit `625545b`), multi-turn `input_required`
+не поддерживается driver'ом (`provide_input` → ошибка), prompts/resources
+не маппятся — см. `docs/design/adr-0001-mcp-dynamic-capabilities.md`.
